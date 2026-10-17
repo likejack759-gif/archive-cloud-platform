@@ -1,0 +1,16 @@
+services:
+  resource-platform:
+    build: .
+    container_name: cloud-resource-platform
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data

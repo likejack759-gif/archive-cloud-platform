@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101827">
+<title>{% block title %}云端资源库{% endblock %}</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1120;--panel:#131d30;--line:#2a3852;--text:#edf3ff;--muted:#9aabc7;--accent:#6ea8ff;--good:#72d6a2;--bad:#ff9292}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#14233d,var(--bg) 55%);color:var(--text);font:16px system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.wrap{width:min(1100px,100%);margin:auto;padding:18px}
+header{display:flex;align-items:center;gap:14px;justify-content:space-between;border-bottom:1px solid var(--line);padding:8px 0 18px;margin-bottom:22px;flex-wrap:wrap}.brand{display:flex;gap:10px;align-items:center;font-weight:800;font-size:20px;color:var(--text)}.logo{display:grid;place-items:center;width:42px;height:42px;background:#233b63;border-radius:13px}
+nav{display:flex;gap:14px;align-items:center;flex-wrap:wrap}nav a{font-size:14px}.muted{color:var(--muted)}.panel{background:rgba(19,29,48,.94);border:1px solid var(--line);border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 12px 28px #0002}
+h1{font-size:clamp(24px,4vw,34px);margin:8px 0}h2{font-size:20px;margin:0 0 12px}p{line-height:1.55}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.between{justify-content:space-between}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}.resource{overflow:hidden;padding:0}.cover{width:100%;aspect-ratio:4/3;object-fit:cover;background:#1b2940;display:block}.resource-body{padding:14px}.resource h3{margin:0 0 7px;overflow-wrap:anywhere}.tag{display:inline-block;border:1px solid var(--line);padding:4px 8px;border-radius:999px;font-size:12px;color:var(--muted)}
+button,.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:0;border-radius:11px;padding:11px 15px;background:#2d5da2;color:white;font-weight:700;cursor:pointer;font-size:14px}button:hover,.btn:hover{filter:brightness(1.12);text-decoration:none}.secondary{background:#26354d}.danger{background:#7f303b}.good{background:#21684e}
+input,textarea,select{width:100%;padding:12px 13px;background:#0d1626;border:1px solid #35445e;border-radius:10px;color:var(--text);font:inherit;margin:6px 0 14px}label{font-size:14px;color:#c5d2e8}textarea{min-height:100px;resize:vertical}form.inline{display:inline-flex;gap:6px;align-items:center;margin:0}form.inline button{padding:8px 10px}.notice{padding:12px;border-radius:10px;background:#193b32;color:#baf2d4;margin:12px 0}.error{background:#4a222a;color:#ffc2c2}.empty{padding:32px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:16px}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:10px;vertical-align:top}th{color:var(--muted)}.table-wrap{overflow:auto}.small{font-size:13px}.footer{padding:28px 0;color:var(--muted);font-size:12px;text-align:center}
+@media(max-width:560px){.wrap{padding:13px}header{align-items:flex-start}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.resource-body{padding:11px}.resource h3{font-size:15px}.panel{padding:14px}nav{gap:10px}}
+</style>
+</head><body><div class="wrap">
+<header><a class="brand" href="/"><span class="logo">☁</span><span>云端资源库<small style="display:block;color:var(--muted);font-size:11px;font-weight:500">CLOUD FILE CENTER</small></span></a>
+<nav>
+{% if user %}
+<a href="/">资源首页</a><a href="/submit">提交资源</a><a href="/my-resources">我的提交</a>
+{% if user.role == 'admin' %}<a href="/admin">管理后台</a>{% endif %}
+<form class="inline" method="post" action="/logout"><button class="secondary" type="submit">退出</button></form>
+{% else %}<a href="/login">登录</a><a href="/register">邀请码注册</a>{% endif %}
+</nav></header>
+{% block content %}{% endblock %}
+<div class="footer">私有账号访问 · 未审核资源不会公开 · 请勿上传违法或侵权文件</div>
+</div></body></html>

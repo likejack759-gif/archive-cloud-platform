@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}云端资源库{% endblock %}{% block content %}
+<section class="panel"><div class="row between"><div><div class="tag">PRIVATE RESOURCE LIBRARY</div><h1>发现你的资源</h1><p class="muted">浏览已审核资源，登录后即可下载到手机。</p></div>{% if user %}<a class="btn" href="/submit">＋ 提交资源</a>{% else %}<a class="btn" href="/login">登录后使用</a>{% endif %}</div>
+{% if user %}<form method="get" action="/" class="row"><div style="flex:1;min-width:180px"><input name="q" value="{{ q }}" placeholder="搜索资源名称或说明" style="margin-bottom:0"></div><button>搜索</button></form>{% endif %}</section>
+{% if not user %}<section class="panel"><h2>欢迎来到云端资源库</h2><p class="muted">本平台采用邀请码注册。请先登录或使用管理员提供的邀请码注册账号。</p><div class="row"><a class="btn" href="/login">登录</a><a class="btn secondary" href="/register">邀请码注册</a></div></section>
+{% else %}
+<h2>已审核资源 <span class="tag">{{ items|length }} 项</span></h2>
+{% if items %}<div class="grid">{% for r in items %}<article class="panel resource"><img class="cover" src="/covers/{{ r.cover_filename }}" alt="资源封面" loading="lazy"><div class="resource-body"><h3>{{ r.name }}</h3><p class="muted small">{{ r.original_filename }}</p>{% if r.description %}<p class="small">{{ r.description }}</p>{% endif %}<div class="row"><span class="tag">{{ "%.1f"|format(r.size_bytes/1048576) }} MB</span><span class="tag">{{ r.downloads }} 次下载</span></div><p class="muted small">提交者：{{ r.owner_name }}</p><a class="btn" style="width:100%" href="/download/{{ r.id }}">↓ 下载到手机</a></div></article>{% endfor %}</div>
+{% else %}<div class="empty">暂时没有已审核的资源。管理员批准提交后会显示在这里。</div>{% endif %}
+{% endif %}{% endblock %}

@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block title %}邀请码注册{% endblock %}{% block content %}
+<div class="panel" style="max-width:480px;margin:30px auto"><h1>创建账号</h1><p class="muted">注册需要管理员提供的有效邀请码。</p>{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<form method="post" action="/register"><label>用户名（3–32 位）</label><input name="username" autocomplete="username" pattern="[A-Za-z0-9_.-]{3,32}" required maxlength="32"><label>密码（至少 10 位）</label><input name="password" type="password" autocomplete="new-password" minlength="10" maxlength="128" required><label>邀请码</label><input name="invite" autocomplete="off" required maxlength="100"><button style="width:100%">注册</button></form><p class="muted small">已有账号？<a href="/login">返回登录</a></p></div>{% endblock %}

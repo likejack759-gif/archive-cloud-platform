@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block title %}登录{% endblock %}{% block content %}
+<div class="panel" style="max-width:480px;margin:30px auto"><h1>登录资源库</h1><p class="muted">登录后浏览和下载已审核资源。</p>{% if registered %}<div class="notice">注册成功，请登录。</div>{% endif %}{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+<form method="post" action="/login"><label>用户名</label><input name="username" autocomplete="username" required maxlength="32"><label>密码</label><input name="password" type="password" autocomplete="current-password" required><button style="width:100%">登录</button></form><p class="muted small">还没有账号？<a href="/register">使用邀请码注册</a></p></div>{% endblock %}
