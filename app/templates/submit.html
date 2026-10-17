@@ -1,3 +1,59 @@
-{% extends "base.html" %}{% block title %}提交资源{% endblock %}{% block content %}
-<div class="panel" style="max-width:720px;margin:auto"><h1>提交新资源</h1><p class="muted">资源需经管理员审核，通过后才会公开给已登录用户下载。压缩包最大 {{ max_upload_mb }} MB；封面最大 8 MB。</p>{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
-<form method="post" action="/submit" enctype="multipart/form-data"><label>资源名称</label><input name="name" required maxlength="100" placeholder="例如：角色资源包"><label>资源说明（可选）</label><textarea name="description" maxlength="2000" placeholder="介绍资源内容、版本或注意事项"></textarea><label>压缩包（ZIP / 7Z / RAR）</label><input type="file" name="archive" accept=".zip,.7z,.rar" required><label>封面图片（JPG / PNG / WEBP / GIF）</label><input type="file" name="cover" accept=".jpg,.jpeg,.png,.webp,.gif" required><div class="row"><button>提交审核</button><a class="btn secondary" href="/my-resources">查看提交记录</a></div></form></div>{% endblock %}
+{% extends "base.html" %}
+{% block title %}提交资源{% endblock %}
+{% block content %}
+<div class="panel" style="max-width:720px;margin:auto">
+  <h1>提交新资源</h1>
+  <p class="muted">
+    资源需经管理员审核，通过后才允许已登录用户下载。
+    文件最大 {{ max_upload_mb }} MB；封面图片最大 8 MB。
+  </p>
+
+  {% if error %}
+  <div class="notice error">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/submit" enctype="multipart/form-data">
+    <label>资源类型</label>
+    <select name="resource_type" required>
+      <option value="archive">压缩包（ZIP / 7Z / RAR）</option>
+      <option value="apk">安卓应用（APK）</option>
+    </select>
+
+    <label>资源名称</label>
+    <input
+      name="name"
+      required
+      maxlength="100"
+      placeholder="例如：角色资源包、工具箱 APK"
+    >
+
+    <label>资源说明（可选）</label>
+    <textarea
+      name="description"
+      maxlength="2000"
+      placeholder="填写应用功能、版本号或资源内容"
+    ></textarea>
+
+    <label>资源文件（压缩包或 APK）</label>
+    <input
+      type="file"
+      name="archive"
+      accept=".zip,.7z,.rar,.apk"
+      required
+    >
+
+    <label>封面图片（JPG / PNG / WEBP / GIF）</label>
+    <input
+      type="file"
+      name="cover"
+      accept=".jpg,.jpeg,.png,.webp,.gif"
+      required
+    >
+
+    <div class="row">
+      <button type="submit">提交审核</button>
+      <a class="btn secondary" href="/my-resources">查看提交记录</a>
+    </div>
+  </form>
+</div>
+{% endblock %}
