@@ -22,6 +22,7 @@ MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "2048")))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "false").lower() == "true"
 ALLOWED_ARCHIVES = {".zip", ".7z", ".rar"}
+ALLOWED_APK = {".apk"}
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 app = FastAPI(title="Cloud Resource Platform")
