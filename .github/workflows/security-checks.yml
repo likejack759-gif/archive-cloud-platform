@@ -2,7 +2,9 @@ name: Security checks
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - security/csrf-login-upload-guards
   push:
     branches:
       - security/csrf-login-upload-guards
