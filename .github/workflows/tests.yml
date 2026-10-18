@@ -19,9 +19,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-      - name: Run unit tests
+        run: python -m pip install -r requirements.txt pytest
+      - name: Run tests
         env:
           SECRET_KEY: test-only-secret-key
           DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
-        run: python -m unittest discover -s tests -v
+        run: python -m pytest -q
