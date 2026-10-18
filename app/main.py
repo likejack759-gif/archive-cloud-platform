@@ -551,13 +551,21 @@ def my_resources(request: Request, notice: str = ""):
 
 @app.get("/covers/{filename:path}")
 def cover_file(request: Request, filename: str):
-    if not current_user(request):
+    user = current_user(request)
+    if not user:
         raise HTTPException(status_code=401, detail="Please log in")
     if not filename.startswith("covers/") or ".." in filename:
         raise HTTPException(status_code=404, detail="File not found")
     with db_connect() as conn:
-        exists = conn.execute("SELECT 1 FROM resources WHERE cover_filename=%s LIMIT 1", (filename,)).fetchone()
-    if not exists:
+        resource = conn.execute(
+            "SELECT user_id, status FROM resources WHERE cover_filename=%s LIMIT 1",
+            (filename,),
+        ).fetchone()
+    if not resource:
+        raise HTTPException(status_code=404, detail="File not found")
+    # Approved covers are visible to logged-in users. For resources that have
+    # not been approved, only the owner and an administrator may view the cover.
+    if resource["status"] != "approved" and user["role"] != "admin" and user["id"] != resource["user_id"]:
         raise HTTPException(status_code=404, detail="File not found")
     ext = Path(filename).suffix.lower()
     mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}.get(ext, "application/octet-stream")
