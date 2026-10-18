@@ -119,3 +119,29 @@ def test_request_guard_allows_small_request():
     response = asyncio.run(main.request_size_guard(request, call_next))
 
     assert response.status_code == 200
+
+def test_login_throttle_prunes_expired_entries(monkeypatch):
+    main._login_attempts.clear()
+    main._login_attempts["expired-key"] = (1, 0.0, 0.0)
+    monkeypatch.setattr(main.time, "monotonic", lambda: float(main.LOGIN_WINDOW_SECONDS + 100))
+    monkeypatch.setattr(main, "_last_login_cleanup", 0.0)
+
+    assert main.login_is_blocked("new-key") == (False, 0)
+    assert "expired-key" not in main._login_attempts
+
+
+def test_login_throttle_fails_closed_when_key_capacity_is_full(monkeypatch):
+    main._login_attempts.clear()
+    monkeypatch.setattr(main, "LOGIN_MAX_TRACKED_KEYS", 2)
+    monkeypatch.setattr(main.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(main, "_last_login_cleanup", 100.0)
+    main._login_attempts["active-1"] = (1, 99.0, 0.0)
+    main._login_attempts["active-2"] = (1, 99.0, 0.0)
+
+    blocked, retry_after = main.login_is_blocked("new-key")
+
+    assert blocked is True
+    assert retry_after == main.LOGIN_CAPACITY_RETRY_SECONDS
+    assert len(main._login_attempts) == 2
+    assert "new-key" not in main._login_attempts
+
