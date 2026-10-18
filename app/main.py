@@ -423,6 +423,7 @@ async def submit_resource(
             s3_delete(cover_key)
         return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="上传失败：请检查对象存储配置或稍后重试。")
     except Exception:
+                logging.exception("Unexpected error in submit_resource")
         if archive_key:
             s3_delete(archive_key)
         if cover_key:
