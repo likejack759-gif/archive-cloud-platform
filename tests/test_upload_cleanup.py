@@ -75,7 +75,7 @@ def test_s3_delete_logs_failure(monkeypatch, caplog):
 
 def test_cover_at_size_limit_is_accepted_and_preserves_size():
     limit = 8 * 1024 * 1024
-    cover = upload("cover.png", b"\\x89PNG\\r\\n\\x1a\\n" + b"x" * (limit - 8))
+    cover = upload("cover.png", b"\x89PNG\r\n\x1a\n" + b"x" * (limit - 8))
     path = None
     try:
         path, size = asyncio.run(main.save_upload_to_temp(
