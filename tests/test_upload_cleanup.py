@@ -40,8 +40,8 @@ def test_cover_size_http_exception_cleans_uploaded_archive(monkeypatch):
     monkeypatch.setattr(main, "s3_delete", lambda key: deleted_keys.append(key))
     monkeypatch.setattr(main, "MAX_UPLOAD_MB", 50)
 
-    archive = upload("test.zip", b"PK\\x03\\x04" + b"x" * 20)
-    cover = upload("cover.png", b"\\x89PNG\\r\\n\\x1a\\n" + b"x" * (8 * 1024 * 1024))
+    archive = upload("test.zip", b"PK\x03\x04" + b"x" * 20)
+    cover = upload("cover.png", b"\x89PNG\r\n\x1a\n" + b"x" * (8 * 1024 * 1024))
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(main.submit_resource(
