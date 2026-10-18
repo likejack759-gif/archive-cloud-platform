@@ -413,6 +413,7 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
             conn.commit()
     except IntegrityError:
         return page(request, "register.html", error="用户名已存在，请更换用户名。")
+    request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
 
