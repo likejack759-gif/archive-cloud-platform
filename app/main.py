@@ -128,11 +128,28 @@ def init_db():
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS max_uses INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS uses INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE invites SET uses=1 WHERE used_by IS NOT NULL AND uses=0")
+        
         if ADMIN_USERNAME and ADMIN_PASSWORD:
-            row = conn.execute("SELECT id FROM users WHERE username=%s", (ADMIN_USERNAME,)).fetchone()
+            row = conn.execute(
+                "SELECT id FROM users WHERE username=%s",
+                (ADMIN_USERNAME,)
+            ).fetchone()
+
+            new_password_hash = hash_password(ADMIN_PASSWORD)
+
             if row is None:
-                conn.execute("INSERT INTO users (username,password_hash,role) VALUES (%s,%s,'admin')", (ADMIN_USERNAME, hash_password(ADMIN_PASSWORD)))
+                conn.execute(
+                    "INSERT INTO users (username,password_hash,role) "
+                    "VALUES (%s,%s,'admin')",
+                    (ADMIN_USERNAME, new_password_hash)
+                )
+            else:
+                conn.execute(
+                    "UPDATE users SET password_hash=%s, role='admin' WHERE id=%s",
+                    (new_password_hash, row["id"])
+                )
         conn.commit()
+
 
 
 @app.on_event("startup")
