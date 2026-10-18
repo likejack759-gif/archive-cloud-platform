@@ -91,7 +91,10 @@ def init_db():
                 used_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                used_at TIMESTAMPTZ
+                used_at TIMESTAMPTZ,
+                label TEXT NOT NULL DEFAULT '',
+                max_uses INTEGER NOT NULL DEFAULT 1,
+                uses INTEGER NOT NULL DEFAULT 0
             )
         """)
         conn.execute("""
@@ -106,17 +109,25 @@ def init_db():
                 cover_filename TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 downloads BIGINT NOT NULL DEFAULT 0,
+                size_bytes BIGINT NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 reviewed_at TIMESTAMPTZ,
-                reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL
+                reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                review_note TEXT NOT NULL DEFAULT ''
             )
         """)
         # Add missing fields safely for databases created by earlier revisions.
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS resource_type TEXT NOT NULL DEFAULT 'archive'")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS cover_filename TEXT")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS downloads BIGINT NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS max_uses INTEGER NOT NULL DEFAULT 1")
+        conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS uses INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE invites SET uses=1 WHERE used_by IS NOT NULL AND uses=0")
         if ADMIN_USERNAME and ADMIN_PASSWORD:
             row = conn.execute("SELECT id FROM users WHERE username=%s", (ADMIN_USERNAME,)).fetchone()
             if row is None:
@@ -253,10 +264,10 @@ def index(request: Request, q: str = "", resource_type: str = ""):
         params.append(resource_type.strip())
     with db_connect() as conn:
         resources = conn.execute(
-            "SELECT r.*, u.username FROM resources r JOIN users u ON u.id=r.user_id WHERE " + " AND ".join(where) + " ORDER BY r.created_at DESC LIMIT 100",
+            "SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE " + " AND ".join(where) + " ORDER BY r.created_at DESC LIMIT 100",
             tuple(params),
         ).fetchall()
-    return page(request, "index.html", user=user, resources=resources, q=q, resource_type=resource_type)
+    return page(request, "index.html", user=user, items=resources, resources=resources, q=q, resource_type=resource_type)
 
 
 @app.get("/register", response_class=HTMLResponse)
@@ -265,20 +276,34 @@ def register_page(request: Request):
 
 
 @app.post("/register")
-def register(request: Request, username: str = Form(...), password: str = Form(...), invite_code: str = Form(...)):
+def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...)):
     username = username.strip()
-    invite_code = invite_code.strip()
+    invite_code = invite.strip()
+    invite_digest = hashlib.sha256(invite_code.encode("utf-8")).hexdigest()
     if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
         return page(request, "register.html", error="用户名需为 3–32 位字母、数字、点、下划线或连字符。")
     if len(password) < 10:
         return page(request, "register.html", error="密码至少需要 10 个字符。")
     try:
         with db_connect() as conn:
-            invite = conn.execute("SELECT id, is_active, used_by FROM invites WHERE code=%s FOR UPDATE", (invite_code,)).fetchone()
-            if not invite or not invite["is_active"] or invite["used_by"] is not None:
-                return page(request, "register.html", error="邀请码无效、已使用或已停用。")
+            invite_row = conn.execute(
+                "SELECT id, is_active, used_by, max_uses, uses FROM invites WHERE code=%s FOR UPDATE",
+                (invite_digest,),
+            ).fetchone()
+            # Accept legacy plaintext invite codes created by an earlier version.
+            if invite_row is None:
+                invite_row = conn.execute(
+                    "SELECT id, is_active, used_by, max_uses, uses FROM invites WHERE code=%s FOR UPDATE",
+                    (invite_code,),
+                ).fetchone()
+            if not invite_row or not invite_row["is_active"] or invite_row["uses"] >= invite_row["max_uses"]:
+                return page(request, "register.html", error="邀请码无效、次数已用完或已停用。")
             user = conn.execute("INSERT INTO users (username,password_hash,role) VALUES (%s,%s,'user') RETURNING id", (username, hash_password(password))).fetchone()
-            conn.execute("UPDATE invites SET used_by=%s, used_at=NOW(), is_active=FALSE WHERE id=%s", (user["id"], invite["id"]))
+            next_uses = invite_row["uses"] + 1
+            conn.execute(
+                "UPDATE invites SET uses=%s, used_by=CASE WHEN %s >= max_uses THEN %s ELSE used_by END, used_at=NOW(), is_active=CASE WHEN %s >= max_uses THEN FALSE ELSE is_active END WHERE id=%s",
+                (next_uses, next_uses, user["id"], next_uses, invite_row["id"]),
+            )
             conn.commit()
     except IntegrityError:
         return page(request, "register.html", error="用户名已存在，请更换用户名。")
@@ -313,7 +338,7 @@ def submit_page(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    return page(request, "submit.html", user=user, error=None)
+    return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error=None)
 
 
 @app.post("/submit")
@@ -329,20 +354,22 @@ async def submit_resource(
     if not user:
         return RedirectResponse("/login", status_code=303)
     name = name.strip()
-    if not name or len(name) > 160:
-        return page(request, "submit.html", user=user, error="资源名称不能为空且不能超过 160 个字符。")
+    if not name or len(name) > 100:
+        return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="资源名称不能为空且不能超过 100 个字符。")
+    if resource_type not in {"archive", "apk"}:
+        return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="请选择有效的资源类型。")
     archive_filename = safe_name(archive.filename or "")
     if Path(archive_filename).suffix.lower() not in {".zip", ".7z", ".rar", ".apk"}:
-        return page(request, "submit.html", user=user, error="只允许 ZIP、7Z、RAR 或 APK 文件。")
+        return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="只允许 ZIP、7Z、RAR 或 APK 文件。")
     archive_path = None
     cover_path = None
     archive_key = None
     cover_key = None
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     try:
-        archive_path, _ = await save_upload_to_temp(archive, max_bytes)
+        archive_path, archive_size = await save_upload_to_temp(archive, max_bytes)
         if not archive_is_valid(archive_path, archive_filename):
-            return page(request, "submit.html", user=user, error="文件内容与扩展名不匹配，或文件格式无效。")
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
         archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
         content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
         s3_put(archive_path, archive_key, content_type)
@@ -351,21 +378,21 @@ async def submit_resource(
             ext = Path(cover_filename).suffix.lower()
             if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
                 s3_delete(archive_key)
-                return page(request, "submit.html", user=user, error="封面只允许 JPG、PNG、WEBP 或 GIF 图片。")
-            cover_path, _ = await save_upload_to_temp(cover, min(max_bytes, 10 * 1024 * 1024))
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="封面只允许 JPG、PNG、WEBP 或 GIF 图片。")
+            cover_path, _ = await save_upload_to_temp(cover, 8 * 1024 * 1024)
             with open(cover_path, "rb") as f:
                 signature = f.read(12)
             valid = (ext in {".jpg", ".jpeg"} and signature.startswith(b"\xff\xd8\xff")) or (ext == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (ext == ".gif" and signature.startswith((b"GIF87a", b"GIF89a"))) or (ext == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")
             if not valid:
                 s3_delete(archive_key)
-                return page(request, "submit.html", user=user, error="封面文件内容不是有效的支持格式图片。")
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="封面文件内容不是有效的支持格式图片。")
             cover_key = f"covers/{secrets.token_hex(16)}{ext}"
             mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}[ext]
             s3_put(cover_path, cover_key, mime)
         with db_connect() as conn:
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending')",
-                (user["id"], resource_type[:40], name, description.strip()[:5000], archive_key, archive_filename, cover_key),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
@@ -376,13 +403,13 @@ async def submit_resource(
             s3_delete(archive_key)
         if cover_key:
             s3_delete(cover_key)
-        return page(request, "submit.html", user=user, error="上传失败：请检查对象存储配置或稍后重试。")
+        return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="上传失败：请检查对象存储配置或稍后重试。")
     except Exception:
         if archive_key:
             s3_delete(archive_key)
         if cover_key:
             s3_delete(cover_key)
-        return page(request, "submit.html", user=user, error="提交失败，请稍后重试。")
+        return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="提交失败，请稍后重试。")
     finally:
         for p in (archive_path, cover_path):
             if p:
@@ -399,7 +426,7 @@ def my_resources(request: Request, notice: str = ""):
         return RedirectResponse("/login", status_code=303)
     with db_connect() as conn:
         resources = conn.execute("SELECT * FROM resources WHERE user_id=%s ORDER BY created_at DESC", (user["id"],)).fetchall()
-    return page(request, "my_resources.html", user=user, resources=resources, notice=notice)
+    return page(request, "my_resources.html", user=user, items=resources, resources=resources, notice=notice, submitted=(notice == "submitted"))
 
 
 @app.get("/covers/{filename:path}")
@@ -454,19 +481,25 @@ def admin_page(request: Request, notice: str = ""):
         raise HTTPException(status_code=403, detail="Administrator access required")
     with db_connect() as conn:
         stats_row = conn.execute("SELECT (SELECT COUNT(*) FROM users) AS users, (SELECT COUNT(*) FROM resources) AS resources, (SELECT COUNT(*) FROM resources WHERE status='pending') AS pending, (SELECT COUNT(*) FROM resources WHERE status='approved') AS approved").fetchone()
-        pending = conn.execute("SELECT r.*, u.username FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
-        invites = conn.execute("SELECT i.*, u.username AS used_by_username FROM invites i LEFT JOIN users u ON u.id=i.used_by ORDER BY i.created_at DESC LIMIT 100").fetchall()
+        pending = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
+        invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
         users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
     stats = dict(stats_row)
-    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, notice=notice, new_invite=request.session.pop("new_invite", None))
+    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, notice=notice)
 
 
-@app.post("/admin/invites/create")
-def create_invite(request: Request):
+@app.post("/admin/invites")
+def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1)):
     admin = require_admin(request)
-    code = secrets.token_urlsafe(9).replace("-", "A").replace("_", "B")[:12]
+    max_uses = max(1, min(int(max_uses), 1000))
+    label = label.strip()[:100]
+    code = secrets.token_urlsafe(12).replace("-", "A").replace("_", "B")[:16]
+    code_digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
     with db_connect() as conn:
-        conn.execute("INSERT INTO invites (code,created_by,is_active) VALUES (%s,%s,TRUE)", (code, admin["id"]))
+        conn.execute(
+            "INSERT INTO invites (code,created_by,is_active,label,max_uses,uses) VALUES (%s,%s,TRUE,%s,%s,0)",
+            (code_digest, admin["id"], label, max_uses),
+        )
         conn.commit()
     request.session["new_invite"] = code
     return RedirectResponse("/admin?notice=invite_created", status_code=303)
@@ -476,19 +509,19 @@ def create_invite(request: Request):
 def toggle_invite(request: Request, invite_id: int):
     require_admin(request)
     with db_connect() as conn:
-        conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND used_by IS NULL", (invite_id,))
+        conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses", (invite_id,))
         conn.commit()
     return RedirectResponse("/admin?notice=invite_updated", status_code=303)
 
 
 @app.post("/admin/resources/{resource_id}/review")
-def review_resource(request: Request, resource_id: int, action: str = Form(...)):
+def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form("")):
     admin = require_admin(request)
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="Invalid review action")
     status = "approved" if action == "approve" else "rejected"
     with db_connect() as conn:
-        conn.execute("UPDATE resources SET status=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, admin["id"], resource_id))
+        conn.execute("UPDATE resources SET status=%s,review_note=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, review_note.strip()[:500], admin["id"], resource_id))
         conn.commit()
     return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
 
