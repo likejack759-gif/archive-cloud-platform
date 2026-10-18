@@ -33,8 +33,12 @@ SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").lower() in {"1", "t
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_LOCKOUT_SECONDS = 15 * 60
+LOGIN_MAX_TRACKED_KEYS = 10_000
+LOGIN_CLEANUP_INTERVAL_SECONDS = 60
+LOGIN_CAPACITY_RETRY_SECONDS = 60
 _login_attempts: dict[str, tuple[int, float, float]] = {}
 _login_attempts_lock = threading.Lock()
+_last_login_cleanup = 0.0
 S3_ENDPOINT = os.getenv("AWS_ENDPOINT_URL_S3", "").strip()
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2").strip()
 S3_BUCKET = os.getenv("S3_BUCKET", "archive-files").strip()
@@ -210,10 +214,34 @@ def login_rate_key(request: Request, username: str) -> str:
     return f"{client_host}:{username.strip().casefold()[:128]}"
 
 
+def _cleanup_login_attempts(now: float, *, force: bool = False) -> None:
+    """Remove expired throttle entries; caller must hold _login_attempts_lock."""
+    global _last_login_cleanup
+    if not force and now - _last_login_cleanup < LOGIN_CLEANUP_INTERVAL_SECONDS:
+        return
+    expired = [
+        key for key, (_, window_start, blocked_until) in _login_attempts.items()
+        if blocked_until <= now and now - window_start >= LOGIN_WINDOW_SECONDS
+    ]
+    for key in expired:
+        _login_attempts.pop(key, None)
+    _last_login_cleanup = now
+
+
 def login_is_blocked(key: str) -> tuple[bool, int]:
     now = time.monotonic()
     with _login_attempts_lock:
-        attempts, window_start, blocked_until = _login_attempts.get(key, (0, now, 0.0))
+        _cleanup_login_attempts(now)
+        entry = _login_attempts.get(key)
+        if entry is None and len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+            # Fail closed instead of allowing unlimited unique keys to grow memory.
+            _cleanup_login_attempts(now, force=True)
+            if len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+                return True, LOGIN_CAPACITY_RETRY_SECONDS
+            entry = None
+        if entry is None:
+            return False, 0
+        _, window_start, blocked_until = entry
         if blocked_until > now:
             return True, max(1, int(blocked_until - now))
         if now - window_start >= LOGIN_WINDOW_SECONDS or blocked_until:
@@ -224,7 +252,14 @@ def login_is_blocked(key: str) -> tuple[bool, int]:
 def record_login_failure(key: str) -> int:
     now = time.monotonic()
     with _login_attempts_lock:
-        attempts, window_start, blocked_until = _login_attempts.get(key, (0, now, 0.0))
+        _cleanup_login_attempts(now)
+        entry = _login_attempts.get(key)
+        if entry is None and len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+            _cleanup_login_attempts(now, force=True)
+            if len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+                return LOGIN_CAPACITY_RETRY_SECONDS
+            entry = None
+        attempts, window_start, blocked_until = entry or (0, now, 0.0)
         if now - window_start >= LOGIN_WINDOW_SECONDS or blocked_until:
             attempts, window_start, blocked_until = 0, now, 0.0
         attempts += 1
