@@ -357,10 +357,11 @@ def s3_put(local_path: str, key: str, content_type: str):
 
 
 def s3_delete(key: str):
+    """Delete an uploaded object; log failures so orphaned objects can be investigated."""
     try:
         s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
     except Exception:
-        pass
+        logging.exception("Failed to delete object from storage: key=%s", key)
 
 
 def stream_s3_object(key: str, filename: str, content_type: str):
@@ -550,8 +551,15 @@ async def submit_resource(
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
-    except HTTPException as exc:
-        raise exc
+    except HTTPException:
+        # A validation/size error can happen after the archive has already been
+        # uploaded (for example, while saving or validating the optional cover).
+        # Best-effort cleanup prevents inaccessible objects from accumulating.
+        if archive_key:
+            s3_delete(archive_key)
+        if cover_key:
+            s3_delete(cover_key)
+        raise
     except (BotoCoreError, ClientError, RuntimeError) as exc:
         if archive_key:
             s3_delete(archive_key)
