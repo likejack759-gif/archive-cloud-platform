@@ -55,6 +55,7 @@ def test_cover_size_http_exception_cleans_uploaded_archive(monkeypatch):
         ))
 
     assert exc.value.status_code == 413
+    assert exc.value.detail == "Cover image exceeds 8 MiB limit"
     assert len(uploaded_keys) == 1
     assert deleted_keys == uploaded_keys
 
