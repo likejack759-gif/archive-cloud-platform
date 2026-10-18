@@ -21,9 +21,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pytest
 
       - name: Check Python syntax
-        run: python -m compileall -q app
+        run: python -m compileall -q app tests
+
+      - name: Run security guard unit tests
+        run: python -m pytest -q tests/test_security_guards.py
 
       - name: Check POST routes and form CSRF tokens
         run: |
@@ -70,12 +78,12 @@ jobs:
           ]
           for name in template_paths:
               html = Path(name).read_text(encoding="utf-8")
-              forms = len(re.findall(r"<form\b", html, re.I))
-              closes = len(re.findall(r"</form\s*>", html, re.I))
+              forms = len(re.findall(r"<form\\b", html, re.I))
+              closes = len(re.findall(r"</form\\s*>", html, re.I))
               tokens = len(re.findall(r"""name=["']csrf_token["']""", html))
               assert forms == closes, f"{name}: form tags mismatch ({forms} opens, {closes} closes)"
               assert forms == tokens, f"{name}: expected one CSRF token per form, found {tokens} for {forms} forms"
-              assert not re.search(r"<form\b[^>]*>[^<]*<form\b", html, re.I), f"{name}: nested form detected"
+              assert not re.search(r"<form\\b[^>]*>[^<]*<form\\b", html, re.I), f"{name}: nested form detected"
 
           print("PASS: Python syntax, 8 POST route CSRF guards, and form token structure.")
           PY
