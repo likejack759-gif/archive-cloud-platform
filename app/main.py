@@ -1,987 +1,524 @@
 import os
 import re
-import hmac
-import hashlib
 import secrets
-import sqlite3
-import uuid
-import mimetypes
+import hashlib
+import tempfile
 import zipfile
-
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Optional
+from urllib.parse import quote
 
-from fastapi import (
-    FastAPI, Request, Form, UploadFile, File, HTTPException
-)
-from fastapi.responses import (
-    HTMLResponse, RedirectResponse, FileResponse, PlainTextResponse
-)
+import boto3
+import psycopg
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, PlainTextResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
+from psycopg.rows import dict_row
+from psycopg.errors import IntegrityError
+
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").lower() in {"1", "true", "yes", "on"}
+S3_ENDPOINT = os.getenv("AWS_ENDPOINT_URL_S3", "").strip()
+AWS_REGION = os.getenv("AWS_REGION", "us-east-2").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "archive-files").strip()
+
+app = FastAPI(title="Archive Cloud Platform")
+if SECRET_KEY:
+    app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=SESSION_HTTPS_ONLY)
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-# =========================================================
-# 1. 基础配置
-# =========================================================
-
-DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
-FILES_DIR = DATA_DIR / "files"
-COVERS_DIR = DATA_DIR / "covers"
-DB_PATH = DATA_DIR / "app.db"
-
-for directory in (FILES_DIR, COVERS_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
-
-SECRET_KEY = os.getenv("SECRET_KEY", "")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
-
-MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "2048")))
-MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-
-SESSION_HTTPS_ONLY = (
-    os.getenv("SESSION_HTTPS_ONLY", "false").lower() == "true"
-)
-
-ALLOWED_ARCHIVES = {".zip", ".7z", ".rar"}
-ALLOWED_APK = {".apk"}
-ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-
-app = FastAPI(title="Cloud Resource Platform")
-
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=SECRET_KEY or "UNSAFE-DEV-KEY-CHANGE-ME",
-    session_cookie="resource_session",
-    same_site="lax",
-    https_only=SESSION_HTTPS_ONLY,
-    max_age=60 * 60 * 24 * 7,
-)
-
-templates = Jinja2Templates(
-    directory=str(Path(__file__).parent / "templates")
-)
+def db_connect():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is not configured")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10, autocommit=False)
 
 
-# =========================================================
-# 2. 通用工具
-# =========================================================
-
-def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def connect():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
-def hash_password(password: str, salt: Optional[bytes] = None) -> str:
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=2**14,
-        r=8,
-        p=1,
+def s3_client():
+    key = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+    secret = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
+    if not all([S3_ENDPOINT, AWS_REGION, S3_BUCKET, key, secret]):
+        raise RuntimeError("Object storage environment variables are incomplete")
+    return boto3.client(
+        "s3", endpoint_url=S3_ENDPOINT, region_name=AWS_REGION,
+        aws_access_key_id=key, aws_secret_access_key=secret,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
-    return salt.hex() + "$" + digest.hex()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
+    return "scrypt$" + salt.hex() + "$" + digest.hex()
 
 
 def verify_password(password: str, encoded: str) -> bool:
     try:
-        salt_hex, digest_hex = encoded.split("$", 1)
-        actual = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=bytes.fromhex(salt_hex),
-            n=2**14,
-            r=8,
-            p=1,
-        )
-        return hmac.compare_digest(actual.hex(), digest_hex)
-    except Exception:
+        method, salt_hex, digest_hex = encoded.split("$", 2)
+        if method != "scrypt":
+            return False
+        actual = hashlib.scrypt(password.encode("utf-8"), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
+        return secrets.compare_digest(actual.hex(), digest_hex)
+    except (ValueError, TypeError):
         return False
 
-
-def safe_name(value: str, maxlen=80):
-    value = re.sub(
-        r'[\x00-\x1f<>:"/\\|?*]',
-        "_",
-        value or "",
-    ).strip(" .")
-    return value[:maxlen] or "未命名资源"
-
-
-def page(request: Request, name: str, context=None, status_code=200):
-    data = {
-        "request": request,
-        "user": current_user(request),
-    }
-    if context:
-        data.update(context)
-    return templates.TemplateResponse(
-        name, data, status_code=status_code
-    )
-
-
-async def save_upload(upload: UploadFile, target: Path, max_bytes: int):
-    total = 0
-    try:
-        with target.open("wb") as out:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-
-                total += len(chunk)
-                if total > max_bytes:
-                    raise HTTPException(
-                        413,
-                        f"文件超过限制（{MAX_UPLOAD_MB} MB）",
-                    )
-
-                out.write(chunk)
-
-        if total == 0:
-            raise HTTPException(400, "不能上传空文件")
-
-        return total
-
-    except Exception:
-        target.unlink(missing_ok=True)
-        raise
-
-    finally:
-        await upload.close()
-
-
-def valid_archive(path: Path, ext: str) -> bool:
-    """基本文件格式检查，不代表安全扫描。"""
-    try:
-        with path.open("rb") as f:
-            sig = f.read(8)
-
-        if ext == ".zip":
-            return sig.startswith(b"PK")
-
-        if ext == ".7z":
-            return sig.startswith(b"7z\xbc\xaf\x27\x1c")
-
-        if ext == ".rar":
-            return sig.startswith(b"Rar!\x1a\x07")
-
-        if ext == ".apk":
-            # APK 是 ZIP 容器。检查 ZIP 结构及 AndroidManifest.xml。
-            if not sig.startswith(b"PK"):
-                return False
-
-            with zipfile.ZipFile(path, "r") as zf:
-                names = zf.namelist()
-                if "AndroidManifest.xml" not in names:
-                    return False
-                if zf.testzip() is not None:
-                    return False
-
-            return True
-
-        return False
-
-    except (OSError, zipfile.BadZipFile, RuntimeError):
-        return False
-
-
-def valid_image(path: Path) -> bool:
-    try:
-        with path.open("rb") as f:
-            sig = f.read(12)
-
-        return (
-            sig.startswith(b"\xff\xd8\xff")
-            or sig.startswith(b"\x89PNG\r\n\x1a\n")
-            or (
-                sig.startswith(b"RIFF")
-                and sig[8:12] == b"WEBP"
-            )
-            or sig.startswith(b"GIF87a")
-            or sig.startswith(b"GIF89a")
-        )
-    except OSError:
-        return False
-
-
-# =========================================================
-# 3. 数据库初始化与旧数据库兼容
-# =========================================================
 
 def init_db():
-    with connect() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS invites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code_hash TEXT UNIQUE NOT NULL,
-            label TEXT NOT NULL DEFAULT '',
-            max_uses INTEGER NOT NULL DEFAULT 1,
-            uses INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS resources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_id INTEGER NOT NULL REFERENCES users(id),
-            name TEXT NOT NULL,
-            description TEXT NOT NULL DEFAULT '',
-            resource_type TEXT NOT NULL DEFAULT 'archive',
-            original_filename TEXT NOT NULL,
-            stored_filename TEXT NOT NULL,
-            cover_filename TEXT,
-            size_bytes INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            reviewed_at TEXT,
-            reviewer_id INTEGER REFERENCES users(id),
-            review_note TEXT NOT NULL DEFAULT '',
-            downloads INTEGER NOT NULL DEFAULT 0
-        );
-        """)
-
-        # 为旧数据库补充资源类型字段，不删除已有数据。
-        columns = {
-            item["name"]
-            for item in c.execute(
-                "PRAGMA table_info(resources)"
-            ).fetchall()
-        }
-
-        if "resource_type" not in columns:
-            c.execute("""
-                ALTER TABLE resources
-                ADD COLUMN resource_type TEXT NOT NULL DEFAULT 'archive'
-            """)
-
-        row = c.execute(
-            "SELECT id FROM users WHERE username=?",
-            (ADMIN_USERNAME,),
-        ).fetchone()
-
-        if not row:
-            if (
-                not ADMIN_PASSWORD
-                or ADMIN_PASSWORD.startswith("REPLACE_")
-            ):
-                raise RuntimeError(
-                    "Set a strong ADMIN_PASSWORD before first startup."
-                )
-
-            c.execute(
-                """
-                INSERT INTO users(
-                    username, password_hash, role, created_at
-                )
-                VALUES(?,?,?,?)
-                """,
-                (
-                    ADMIN_USERNAME,
-                    hash_password(ADMIN_PASSWORD),
-                    "admin",
-                    now(),
-                ),
+    with db_connect() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id BIGSERIAL PRIMARY KEY,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS invites (
+                id BIGSERIAL PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                used_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                used_at TIMESTAMPTZ
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS resources (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                resource_type TEXT NOT NULL DEFAULT 'archive',
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                filename TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                cover_filename TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                downloads BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMPTZ,
+                reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL
+            )
+        """)
+        # Add missing fields safely for databases created by earlier revisions.
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS resource_type TEXT NOT NULL DEFAULT 'archive'")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS cover_filename TEXT")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS downloads BIGINT NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL")
+        if ADMIN_USERNAME and ADMIN_PASSWORD:
+            row = conn.execute("SELECT id FROM users WHERE username=%s", (ADMIN_USERNAME,)).fetchone()
+            if row is None:
+                conn.execute("INSERT INTO users (username,password_hash,role) VALUES (%s,%s,'admin')", (ADMIN_USERNAME, hash_password(ADMIN_PASSWORD)))
+        conn.commit()
 
 
 @app.on_event("startup")
 def startup():
-    if not SECRET_KEY or SECRET_KEY.startswith("REPLACE_"):
-        raise RuntimeError(
-            "Set a unique random SECRET_KEY before startup."
-        )
+    if not SECRET_KEY:
+        raise RuntimeError("Set SECRET_KEY in your deployment environment")
+    if not DATABASE_URL:
+        raise RuntimeError("Set DATABASE_URL in your deployment environment")
     init_db()
 
 
-# =========================================================
-# 4. 登录与权限
-# =========================================================
-
 def current_user(request: Request):
-    uid = request.session.get("uid")
+    uid = request.session.get("user_id")
     if not uid:
         return None
-
-    with connect() as c:
-        return c.execute(
-            "SELECT id, username, role FROM users WHERE id=?",
-            (uid,),
-        ).fetchone()
+    with db_connect() as conn:
+        return conn.execute("SELECT id, username, role, created_at FROM users WHERE id=%s", (uid,)).fetchone()
 
 
 def require_user(request: Request):
-    u = current_user(request)
-    if not u:
-        raise HTTPException(401, "请先登录")
-    return u
+    user = current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Please log in")
+    return user
 
 
 def require_admin(request: Request):
-    u = require_user(request)
-    if u["role"] != "admin":
-        raise HTTPException(403, "需要管理员权限")
-    return u
+    user = require_user(request)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return user
 
 
-# =========================================================
-# 5. 首页与资源搜索
-# =========================================================
+def page(request: Request, template: str, **context):
+    if not context.get("user"):
+        context["user"] = current_user(request)
+    return templates.TemplateResponse(request=request, name=template, context=context)
+
+
+def safe_name(name: str) -> str:
+    name = Path(name or "upload.bin").name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return (name or "upload.bin")[:180]
+
+
+def archive_is_valid(path: str, filename: str) -> bool:
+    ext = Path(filename).suffix.lower()
+    with open(path, "rb") as f:
+        head = f.read(16)
+    if ext == ".zip":
+        return head.startswith(b"PK\x03\x04") or head.startswith(b"PK\x05\x06") or head.startswith(b"PK\x07\x08")
+    if ext == ".apk":
+        if not (head.startswith(b"PK\x03\x04") or head.startswith(b"PK\x05\x06")):
+            return False
+        try:
+            with zipfile.ZipFile(path) as zf:
+                return "AndroidManifest.xml" in zf.namelist()
+        except (zipfile.BadZipFile, OSError):
+            return False
+    if ext == ".7z":
+        return head.startswith(b"7z\xbc\xaf\x27\x1c")
+    if ext == ".rar":
+        return head.startswith(b"Rar!\x1a\x07")
+    return False
+
+
+async def save_upload_to_temp(upload: UploadFile, max_bytes: int) -> tuple[str, int]:
+    suffix = Path(upload.filename or "upload.bin").suffix[:12]
+    fd, path = tempfile.mkstemp(prefix="archive-upload-", suffix=suffix)
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
+                out.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        return path, total
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    finally:
+        await upload.close()
+
+
+def s3_put(local_path: str, key: str, content_type: str):
+    client = s3_client()
+    client.upload_file(local_path, S3_BUCKET, key, ExtraArgs={"ContentType": content_type})
+
+
+def s3_delete(key: str):
+    try:
+        s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
+    except Exception:
+        pass
+
+
+def stream_s3_object(key: str, filename: str, content_type: str):
+    try:
+        obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"NoSuchKey", "404", "NotFound"}:
+            raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=502, detail="Object storage read failed")
+    body = obj["Body"]
+    headers = {"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}", "Cache-Control": "private, no-store"}
+    return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type=content_type, headers=headers)
+
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request, q: str = ""):
-    u = current_user(request)
-    items = []
+def index(request: Request, q: str = "", resource_type: str = ""):
+    user = current_user(request)
+    where = ["r.status='approved'"]
+    params = []
+    if q.strip():
+        where.append("(r.name ILIKE %s OR r.description ILIKE %s)")
+        params.extend([f"%{q.strip()}%", f"%{q.strip()}%"])
+    if resource_type.strip():
+        where.append("r.resource_type=%s")
+        params.append(resource_type.strip())
+    with db_connect() as conn:
+        resources = conn.execute(
+            "SELECT r.*, u.username FROM resources r JOIN users u ON u.id=r.user_id WHERE " + " AND ".join(where) + " ORDER BY r.created_at DESC LIMIT 100",
+            tuple(params),
+        ).fetchall()
+    return page(request, "index.html", user=user, resources=resources, q=q, resource_type=resource_type)
 
-    if u:
-        keyword = f"%{q[:100]}%"
-        with connect() as c:
-            items = c.execute(
-                """
-                SELECT r.*, users.username AS owner_name
-                FROM resources r
-                JOIN users ON users.id = r.owner_id
-                WHERE r.status='approved'
-                  AND (r.name LIKE ? OR r.description LIKE ?)
-                ORDER BY r.reviewed_at DESC, r.id DESC
-                LIMIT 300
-                """,
-                (keyword, keyword),
-            ).fetchall()
-
-    return page(
-        request,
-        "index.html",
-        {
-            "items": items,
-            "q": q,
-            "max_upload_mb": MAX_UPLOAD_MB,
-        },
-    )
-
-
-# =========================================================
-# 6. 邀请码注册
-# =========================================================
 
 @app.get("/register", response_class=HTMLResponse)
 def register_page(request: Request):
-    if current_user(request):
-        return RedirectResponse("/", 303)
-
-    return page(
-        request,
-        "register.html",
-        {"error": None},
-    )
+    return page(request, "register.html", error=None)
 
 
-@app.post("/register", response_class=HTMLResponse)
-def register(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    invite: str = Form(...),
-):
+@app.post("/register")
+def register(request: Request, username: str = Form(...), password: str = Form(...), invite_code: str = Form(...)):
     username = username.strip()
-
+    invite_code = invite_code.strip()
     if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
-        return page(
-            request,
-            "register.html",
-            {"error": "用户名需为 3–32 位字母、数字、点、下划线或连字符。"},
-            400,
-        )
+        return page(request, "register.html", error="用户名需为 3–32 位字母、数字、点、下划线或连字符。")
+    if len(password) < 10:
+        return page(request, "register.html", error="密码至少需要 10 个字符。")
+    try:
+        with db_connect() as conn:
+            invite = conn.execute("SELECT id, is_active, used_by FROM invites WHERE code=%s FOR UPDATE", (invite_code,)).fetchone()
+            if not invite or not invite["is_active"] or invite["used_by"] is not None:
+                return page(request, "register.html", error="邀请码无效、已使用或已停用。")
+            user = conn.execute("INSERT INTO users (username,password_hash,role) VALUES (%s,%s,'user') RETURNING id", (username, hash_password(password))).fetchone()
+            conn.execute("UPDATE invites SET used_by=%s, used_at=NOW(), is_active=FALSE WHERE id=%s", (user["id"], invite["id"]))
+            conn.commit()
+    except IntegrityError:
+        return page(request, "register.html", error="用户名已存在，请更换用户名。")
+    request.session["user_id"] = user["id"]
+    return RedirectResponse("/", status_code=303)
 
-    if len(password) < 10 or len(password) > 128:
-        return page(
-            request,
-            "register.html",
-            {"error": "密码长度必须为 10–128 个字符。"},
-            400,
-        )
-
-    code_hash = hashlib.sha256(
-        invite.strip().encode()
-    ).hexdigest()
-
-    with connect() as c:
-        inv = c.execute(
-            "SELECT * FROM invites WHERE code_hash=? AND active=1",
-            (code_hash,),
-        ).fetchone()
-
-        if not inv or inv["uses"] >= inv["max_uses"]:
-            return page(
-                request,
-                "register.html",
-                {"error": "邀请码无效、已停用或已用完。"},
-                400,
-            )
-
-        try:
-            c.execute(
-                """
-                INSERT INTO users(username,password_hash,role,created_at)
-                VALUES(?,?,?,?)
-                """,
-                (username, hash_password(password), "user", now()),
-            )
-        except sqlite3.IntegrityError:
-            return page(
-                request,
-                "register.html",
-                {"error": "用户名已存在。"},
-                400,
-            )
-
-        c.execute(
-            "UPDATE invites SET uses=uses+1 WHERE id=?",
-            (inv["id"],),
-        )
-
-    return RedirectResponse("/login?registered=1", 303)
-
-
-# =========================================================
-# 7. 登录与退出
-# =========================================================
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request, registered: int = 0):
-    if current_user(request):
-        return RedirectResponse("/", 303)
-
-    return page(
-        request,
-        "login.html",
-        {
-            "error": None,
-            "registered": bool(registered),
-        },
-    )
+def login_page(request: Request):
+    return page(request, "login.html", error=None)
 
 
-@app.post("/login", response_class=HTMLResponse)
-def login(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-):
-    with connect() as c:
-        u = c.execute(
-            "SELECT * FROM users WHERE username=?",
-            (username.strip(),),
-        ).fetchone()
-
-    if not u or not verify_password(password, u["password_hash"]):
-        return page(
-            request,
-            "login.html",
-            {
-                "error": "用户名或密码错误。",
-                "registered": False,
-            },
-            401,
-        )
-
+@app.post("/login")
+def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    with db_connect() as conn:
+        user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (username.strip(),)).fetchone()
+    if not user or not verify_password(password, user["password_hash"]):
+        return page(request, "login.html", error="用户名或密码不正确。")
     request.session.clear()
-    request.session["uid"] = u["id"]
-    request.session["username"] = u["username"]
-    request.session["role"] = u["role"]
-
-    return RedirectResponse("/", 303)
+    request.session["user_id"] = user["id"]
+    return RedirectResponse("/", status_code=303)
 
 
 @app.post("/logout")
 def logout(request: Request):
     request.session.clear()
-    return RedirectResponse("/", 303)
+    return RedirectResponse("/", status_code=303)
 
-
-# =========================================================
-# 8. 提交资源页面
-# =========================================================
 
 @app.get("/submit", response_class=HTMLResponse)
 def submit_page(request: Request):
-    require_user(request)
-
-    return page(
-        request,
-        "submit.html",
-        {
-            "error": None,
-            "max_upload_mb": MAX_UPLOAD_MB,
-        },
-    )
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    return page(request, "submit.html", user=user, error=None)
 
 
-# =========================================================
-# 9. 完整上传处理：压缩包 + APK + 名称 + 封面
-# =========================================================
-
-@app.post("/submit", response_class=HTMLResponse)
+@app.post("/submit")
 async def submit_resource(
     request: Request,
+    resource_type: str = Form(...),
     name: str = Form(...),
     description: str = Form(""),
-    resource_type: str = Form("archive"),
     archive: UploadFile = File(...),
-    cover: UploadFile = File(...),
+    cover: UploadFile | None = File(None),
 ):
-    u = require_user(request)
-
-    clean_name = safe_name(name, 100)
-    ext = Path(archive.filename or "").suffix.lower()
-    cover_ext = Path(cover.filename or "").suffix.lower()
-
-    if resource_type == "apk":
-        if ext not in ALLOWED_APK:
-            return page(
-                request,
-                "submit.html",
-                {
-                    "error": "安卓应用只能上传 APK 文件。",
-                    "max_upload_mb": MAX_UPLOAD_MB,
-                },
-                400,
-            )
-
-    elif resource_type == "archive":
-        if ext not in ALLOWED_ARCHIVES:
-            return page(
-                request,
-                "submit.html",
-                {
-                    "error": "压缩包仅支持 ZIP、7Z、RAR 文件。",
-                    "max_upload_mb": MAX_UPLOAD_MB,
-                },
-                400,
-            )
-
-    else:
-        return page(
-            request,
-            "submit.html",
-            {
-                "error": "请选择有效的资源类型。",
-                "max_upload_mb": MAX_UPLOAD_MB,
-            },
-            400,
-        )
-
-    if cover_ext not in ALLOWED_IMAGES:
-        return page(
-            request,
-            "submit.html",
-            {
-                "error": "封面仅支持 JPG、PNG、WEBP、GIF。",
-                "max_upload_mb": MAX_UPLOAD_MB,
-            },
-            400,
-        )
-
-    stored = f"{uuid.uuid4().hex}{ext}"
-    cover_stored = f"{uuid.uuid4().hex}{cover_ext}"
-
-    archive_path = FILES_DIR / stored
-    cover_path = COVERS_DIR / cover_stored
-
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    name = name.strip()
+    if not name or len(name) > 160:
+        return page(request, "submit.html", user=user, error="资源名称不能为空且不能超过 160 个字符。")
+    archive_filename = safe_name(archive.filename or "")
+    if Path(archive_filename).suffix.lower() not in {".zip", ".7z", ".rar", ".apk"}:
+        return page(request, "submit.html", user=user, error="只允许 ZIP、7Z、RAR 或 APK 文件。")
+    archive_path = None
+    cover_path = None
+    archive_key = None
+    cover_key = None
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     try:
-        size = await save_upload(
-            archive,
-            archive_path,
-            MAX_UPLOAD_BYTES,
-        )
-
-        await save_upload(
-            cover,
-            cover_path,
-            8 * 1024 * 1024,
-        )
-
-        if not valid_archive(archive_path, ext):
-            raise HTTPException(
-                400,
-                "文件格式校验失败，或文件内容与扩展名不匹配。",
+        archive_path, _ = await save_upload_to_temp(archive, max_bytes)
+        if not archive_is_valid(archive_path, archive_filename):
+            return page(request, "submit.html", user=user, error="文件内容与扩展名不匹配，或文件格式无效。")
+        archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
+        content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
+        s3_put(archive_path, archive_key, content_type)
+        if cover and cover.filename:
+            cover_filename = safe_name(cover.filename)
+            ext = Path(cover_filename).suffix.lower()
+            if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                s3_delete(archive_key)
+                return page(request, "submit.html", user=user, error="封面只允许 JPG、PNG、WEBP 或 GIF 图片。")
+            cover_path, _ = await save_upload_to_temp(cover, min(max_bytes, 10 * 1024 * 1024))
+            with open(cover_path, "rb") as f:
+                signature = f.read(12)
+            valid = (ext in {".jpg", ".jpeg"} and signature.startswith(b"\xff\xd8\xff")) or (ext == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (ext == ".gif" and signature.startswith((b"GIF87a", b"GIF89a"))) or (ext == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")
+            if not valid:
+                s3_delete(archive_key)
+                return page(request, "submit.html", user=user, error="封面文件内容不是有效的支持格式图片。")
+            cover_key = f"covers/{secrets.token_hex(16)}{ext}"
+            mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}[ext]
+            s3_put(cover_path, cover_key, mime)
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending')",
+                (user["id"], resource_type[:40], name, description.strip()[:5000], archive_key, archive_filename, cover_key),
             )
-
-        if not valid_image(cover_path):
-            raise HTTPException(
-                400,
-                "封面图片内容无效。",
-            )
-
-        with connect() as c:
-            c.execute(
-                """
-                INSERT INTO resources(
-                    owner_id,
-                    name,
-                    description,
-                    resource_type,
-                    original_filename,
-                    stored_filename,
-                    cover_filename,
-                    size_bytes,
-                    status,
-                    created_at
-                )
-                VALUES(?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    u["id"],
-                    clean_name,
-                    description[:2000],
-                    resource_type,
-                    safe_name(archive.filename, 180),
-                    stored,
-                    cover_stored,
-                    size,
-                    "pending",
-                    now(),
-                ),
-            )
-
+            conn.commit()
+        return RedirectResponse("/my-resources?notice=submitted", status_code=303)
+    except HTTPException as exc:
+        raise exc
+    except (BotoCoreError, ClientError, RuntimeError) as exc:
+        if archive_key:
+            s3_delete(archive_key)
+        if cover_key:
+            s3_delete(cover_key)
+        return page(request, "submit.html", user=user, error="上传失败：请检查对象存储配置或稍后重试。")
     except Exception:
-        archive_path.unlink(missing_ok=True)
-        cover_path.unlink(missing_ok=True)
-        raise
+        if archive_key:
+            s3_delete(archive_key)
+        if cover_key:
+            s3_delete(cover_key)
+        return page(request, "submit.html", user=user, error="提交失败，请稍后重试。")
+    finally:
+        for p in (archive_path, cover_path):
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
-    return RedirectResponse(
-        "/my-resources?submitted=1",
-        303,
-    )
-
-
-# =========================================================
-# 10. 我的提交记录
-# =========================================================
 
 @app.get("/my-resources", response_class=HTMLResponse)
-def my_resources(request: Request, submitted: int = 0):
-    u = require_user(request)
-
-    with connect() as c:
-        items = c.execute(
-            """
-            SELECT * FROM resources
-            WHERE owner_id=?
-            ORDER BY id DESC
-            """,
-            (u["id"],),
-        ).fetchall()
-
-    return page(
-        request,
-        "my_resources.html",
-        {
-            "items": items,
-            "submitted": bool(submitted),
-        },
-    )
+def my_resources(request: Request, notice: str = ""):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    with db_connect() as conn:
+        resources = conn.execute("SELECT * FROM resources WHERE user_id=%s ORDER BY created_at DESC", (user["id"],)).fetchall()
+    return page(request, "my_resources.html", user=user, resources=resources, notice=notice)
 
 
-# =========================================================
-# 11. 封面图片
-# =========================================================
+@app.get("/covers/{filename:path}")
+def cover_file(request: Request, filename: str):
+    if not current_user(request):
+        raise HTTPException(status_code=401, detail="Please log in")
+    if not filename.startswith("covers/") or ".." in filename:
+        raise HTTPException(status_code=404, detail="File not found")
+    with db_connect() as conn:
+        exists = conn.execute("SELECT 1 FROM resources WHERE cover_filename=%s LIMIT 1", (filename,)).fetchone()
+    if not exists:
+        raise HTTPException(status_code=404, detail="File not found")
+    ext = Path(filename).suffix.lower()
+    mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}.get(ext, "application/octet-stream")
+    return stream_s3_object(filename, Path(filename).name, mime)
 
-@app.get("/covers/{filename}")
-def cover(filename: str):
-    if not re.fullmatch(
-        r"[a-f0-9]{32}\.(jpg|jpeg|png|webp|gif)",
-        filename,
-    ):
-        raise HTTPException(404)
-
-    path = COVERS_DIR / filename
-
-    if not path.is_file():
-        raise HTTPException(404)
-
-    media = (
-        mimetypes.guess_type(path.name)[0]
-        or "application/octet-stream"
-    )
-
-    return FileResponse(
-        path,
-        media_type=media,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
-
-
-# =========================================================
-# 12. 下载：必须登录，且资源已经审核通过
-# =========================================================
 
 @app.get("/download/{resource_id}")
-def download(request: Request, resource_id: int):
-    require_user(request)
+def download_resource(request: Request, resource_id: int):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    with db_connect() as conn:
+        resource = conn.execute("SELECT * FROM resources WHERE id=%s", (resource_id,)).fetchone()
+        if not resource or resource["status"] != "approved":
+            raise HTTPException(status_code=404, detail="Resource not found")
+        conn.execute("UPDATE resources SET downloads=downloads+1 WHERE id=%s", (resource_id,))
+        conn.commit()
+    key = resource["filename"]
+    if not key.startswith("files/") or ".." in key:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+    except ClientError:
+        raise HTTPException(status_code=502, detail="Unable to retrieve file")
+    body = obj["Body"]
+    filename = safe_name(resource["original_filename"] or Path(key).name)
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type="application/octet-stream", headers=headers)
 
-    with connect() as c:
-        r = c.execute(
-            """
-            SELECT * FROM resources
-            WHERE id=? AND status='approved'
-            """,
-            (resource_id,),
-        ).fetchone()
-
-        if not r:
-            raise HTTPException(
-                404,
-                "资源不存在或尚未审核通过",
-            )
-
-        path = FILES_DIR / r["stored_filename"]
-
-        if not path.is_file():
-            raise HTTPException(
-                404,
-                "文件暂时不可用",
-            )
-
-        c.execute(
-            "UPDATE resources SET downloads=downloads+1 WHERE id=?",
-            (resource_id,),
-        )
-
-    return FileResponse(
-        path,
-        filename=r["original_filename"],
-        media_type="application/octet-stream",
-    )
-
-
-# =========================================================
-# 13. 管理员后台
-# =========================================================
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_page(request: Request):
-    require_admin(request)
-
-    with connect() as c:
-        pending = c.execute(
-            """
-            SELECT r.*, u.username AS owner_name
-            FROM resources r
-            JOIN users u ON u.id=r.owner_id
-            WHERE r.status='pending'
-            ORDER BY r.id ASC
-            """
-        ).fetchall()
-
-        invites = c.execute(
-            "SELECT * FROM invites ORDER BY id DESC LIMIT 50"
-        ).fetchall()
-
-        users = c.execute(
-            """
-            SELECT id, username, role, created_at
-            FROM users ORDER BY id DESC LIMIT 100
-            """
-        ).fetchall()
-
-        stats = {
-            "users": c.execute(
-                "SELECT COUNT(*) FROM users"
-            ).fetchone()[0],
-
-            "resources": c.execute(
-                "SELECT COUNT(*) FROM resources"
-            ).fetchone()[0],
-
-            "pending": c.execute(
-                "SELECT COUNT(*) FROM resources WHERE status='pending'"
-            ).fetchone()[0],
-
-            "approved": c.execute(
-                "SELECT COUNT(*) FROM resources WHERE status='approved'"
-            ).fetchone()[0],
-        }
-
-    return page(
-        request,
-        "admin.html",
-        {
-            "pending": pending,
-            "invites": invites,
-            "users": users,
-            "stats": stats,
-            "notice": request.query_params.get("notice"),
-        },
-    )
+def admin_page(request: Request, notice: str = ""):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    with db_connect() as conn:
+        stats_row = conn.execute("SELECT (SELECT COUNT(*) FROM users) AS users, (SELECT COUNT(*) FROM resources) AS resources, (SELECT COUNT(*) FROM resources WHERE status='pending') AS pending, (SELECT COUNT(*) FROM resources WHERE status='approved') AS approved").fetchone()
+        pending = conn.execute("SELECT r.*, u.username FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
+        invites = conn.execute("SELECT i.*, u.username AS used_by_username FROM invites i LEFT JOIN users u ON u.id=i.used_by ORDER BY i.created_at DESC LIMIT 100").fetchall()
+        users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
+    stats = dict(stats_row)
+    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, notice=notice, new_invite=request.session.pop("new_invite", None))
 
 
-# =========================================================
-# 14. 创建邀请码
-# =========================================================
-
-@app.post("/admin/invites")
-def create_invite(
-    request: Request,
-    label: str = Form(""),
-    max_uses: int = Form(1),
-):
-    require_admin(request)
-
-    max_uses = min(1000, max(1, max_uses))
-
-    code = secrets.token_urlsafe(9)
-    digest = hashlib.sha256(code.encode()).hexdigest()
-
-    with connect() as c:
-        c.execute(
-            """
-            INSERT INTO invites(
-                code_hash, label, max_uses, uses, created_at, active
-            )
-            VALUES(?,?,?,?,?,1)
-            """,
-            (
-                digest,
-                safe_name(label, 100) if label.strip() else "",
-                max_uses,
-                0,
-                now(),
-            ),
-        )
-
-    # 邀请码明文只在创建后显示一次。
+@app.post("/admin/invites/create")
+def create_invite(request: Request):
+    admin = require_admin(request)
+    code = secrets.token_urlsafe(9).replace("-", "A").replace("_", "B")[:12]
+    with db_connect() as conn:
+        conn.execute("INSERT INTO invites (code,created_by,is_active) VALUES (%s,%s,TRUE)", (code, admin["id"]))
+        conn.commit()
     request.session["new_invite"] = code
-
-    return RedirectResponse(
-        "/admin?notice=invite_created",
-        303,
-    )
+    return RedirectResponse("/admin?notice=invite_created", status_code=303)
 
 
 @app.post("/admin/invites/{invite_id}/toggle")
 def toggle_invite(request: Request, invite_id: int):
     require_admin(request)
+    with db_connect() as conn:
+        conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND used_by IS NULL", (invite_id,))
+        conn.commit()
+    return RedirectResponse("/admin?notice=invite_updated", status_code=303)
 
-    with connect() as c:
-        row = c.execute(
-            "SELECT active FROM invites WHERE id=?",
-            (invite_id,),
-        ).fetchone()
-
-        if row:
-            c.execute(
-                "UPDATE invites SET active=? WHERE id=?",
-                (0 if row["active"] else 1, invite_id),
-            )
-
-    return RedirectResponse("/admin", 303)
-
-
-# =========================================================
-# 15. 审核资源
-# =========================================================
 
 @app.post("/admin/resources/{resource_id}/review")
-def review_resource(
-    request: Request,
-    resource_id: int,
-    action: str = Form(...),
-    review_note: str = Form(""),
-):
+def review_resource(request: Request, resource_id: int, action: str = Form(...)):
     admin = require_admin(request)
-
     if action not in {"approve", "reject"}:
-        raise HTTPException(400, "无效操作")
+        raise HTTPException(status_code=400, detail="Invalid review action")
+    status = "approved" if action == "approve" else "rejected"
+    with db_connect() as conn:
+        conn.execute("UPDATE resources SET status=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, admin["id"], resource_id))
+        conn.commit()
+    return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
 
-    status = (
-        "approved" if action == "approve" else "rejected"
-    )
-
-    with connect() as c:
-        r = c.execute(
-            "SELECT id FROM resources WHERE id=?",
-            (resource_id,),
-        ).fetchone()
-
-        if not r:
-            raise HTTPException(404)
-
-        c.execute(
-            """
-            UPDATE resources
-            SET status=?, reviewed_at=?, reviewer_id=?, review_note=?
-            WHERE id=?
-            """,
-            (
-                status,
-                now(),
-                admin["id"],
-                review_note[:500],
-                resource_id,
-            ),
-        )
-
-    return RedirectResponse("/admin", 303)
-
-
-# =========================================================
-# 16. 管理用户权限
-# =========================================================
 
 @app.post("/admin/users/{user_id}/role")
-def change_role(
-    request: Request,
-    user_id: int,
-    role: str = Form(...),
-):
+def change_user_role(request: Request, user_id: int, role: str = Form(...)):
     admin = require_admin(request)
-
     if role not in {"user", "admin"}:
-        raise HTTPException(400)
-
+        raise HTTPException(status_code=400, detail="Invalid role")
     if user_id == admin["id"] and role != "admin":
-        raise HTTPException(
-            400,
-            "不能降级当前管理员",
-        )
+        raise HTTPException(status_code=400, detail="You cannot remove your own administrator role")
+    with db_connect() as conn:
+        conn.execute("UPDATE users SET role=%s WHERE id=%s", (role, user_id))
+        conn.commit()
+    return RedirectResponse("/admin?notice=user_role_updated", status_code=303)
 
-    with connect() as c:
-        c.execute(
-            "UPDATE users SET role=? WHERE id=?",
-            (role, user_id),
-        )
-
-    return RedirectResponse("/admin", 303)
-
-
-# =========================================================
-# 17. 健康检查与 robots
-# =========================================================
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    result = {"status": "ok", "database": "unknown", "storage": "configured" if all([S3_ENDPOINT, os.getenv("AWS_ACCESS_KEY_ID"), os.getenv("AWS_SECRET_ACCESS_KEY"), S3_BUCKET]) else "missing_config"}
+    try:
+        with db_connect() as conn:
+            conn.execute("SELECT 1")
+        result["database"] = "ok"
+    except Exception:
+        result["status"] = "degraded"
+        result["database"] = "error"
+    return JSONResponse(result, status_code=200 if result["status"] == "ok" else 503)
 
 
 @app.get("/robots.txt")
 def robots():
-    return PlainTextResponse(
-        "User-agent: *\nDisallow: /\n"
-    )
+    return PlainTextResponse("User-agent: *\nDisallow: /admin\nDisallow: /my-resources\n")
