@@ -324,7 +324,7 @@ def archive_is_valid(path: str, filename: str) -> bool:
     return False
 
 
-async def save_upload_to_temp(upload: UploadFile, max_bytes: int) -> tuple[str, int]:
+async def save_upload_to_temp(upload: UploadFile, max_bytes: int, *, file_label: str = "File") -> tuple[str, int]:
     suffix = Path(upload.filename or "upload.bin").suffix[:12]
     fd, path = tempfile.mkstemp(prefix="archive-upload-", suffix=suffix)
     total = 0
@@ -336,7 +336,8 @@ async def save_upload_to_temp(upload: UploadFile, max_bytes: int) -> tuple[str, 
                     break
                 total += len(chunk)
                 if total > max_bytes:
-                    raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit")
+                    limit_mib = max_bytes / (1024 * 1024)
+                    raise HTTPException(status_code=413, detail=f"{file_label} exceeds {limit_mib:g} MiB limit")
                 out.write(chunk)
         if total == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -522,7 +523,7 @@ async def submit_resource(
     cover_key = None
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     try:
-        archive_path, archive_size = await save_upload_to_temp(archive, max_bytes)
+        archive_path, archive_size = await save_upload_to_temp(archive, max_bytes, file_label="Archive")
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
         archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
@@ -534,7 +535,7 @@ async def submit_resource(
             if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
                 s3_delete(archive_key)
                 return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="封面只允许 JPG、PNG、WEBP 或 GIF 图片。")
-            cover_path, _ = await save_upload_to_temp(cover, 8 * 1024 * 1024)
+            cover_path, _ = await save_upload_to_temp(cover, 8 * 1024 * 1024, file_label="Cover image")
             with open(cover_path, "rb") as f:
                 signature = f.read(12)
             valid = (ext in {".jpg", ".jpeg"} and signature.startswith(b"\xff\xd8\xff")) or (ext == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (ext == ".gif" and signature.startswith((b"GIF87a", b"GIF89a"))) or (ext == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")

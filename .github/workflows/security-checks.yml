@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - security/csrf-login-upload-guards
+      - fix/accurate-upload-size-errors
 
 permissions:
   contents: read

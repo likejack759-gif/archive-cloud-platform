@@ -55,6 +55,7 @@ def test_cover_size_http_exception_cleans_uploaded_archive(monkeypatch):
         ))
 
     assert exc.value.status_code == 413
+    assert exc.value.detail == "Cover image exceeds 8 MiB limit"
     assert len(uploaded_keys) == 1
     assert deleted_keys == uploaded_keys
 
@@ -71,3 +72,19 @@ def test_s3_delete_logs_failure(monkeypatch, caplog):
 
     assert "Failed to delete object from storage" in caplog.text
     assert "files/orphan.zip" in caplog.text
+
+def test_cover_at_size_limit_is_accepted_and_preserves_size():
+    limit = 8 * 1024 * 1024
+    cover = upload("cover.png", b"\x89PNG\r\n\x1a\n" + b"x" * (limit - 8))
+    path = None
+    try:
+        path, size = asyncio.run(main.save_upload_to_temp(
+            cover, limit, file_label="Cover image"
+        ))
+        assert size == limit
+        with open(path, "rb") as saved:
+            assert len(saved.read()) == limit
+    finally:
+        if path:
+            from pathlib import Path
+            Path(path).unlink(missing_ok=True)
