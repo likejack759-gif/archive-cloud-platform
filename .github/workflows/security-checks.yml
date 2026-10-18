@@ -70,12 +70,12 @@ jobs:
           ]
           for name in template_paths:
               html = Path(name).read_text(encoding="utf-8")
-              forms = len(re.findall(r"<form\\b", html, re.I))
-              closes = len(re.findall(r"</form\\s*>", html, re.I))
-              tokens = len(re.findall(r'name=["\\']csrf_token["\\']', html))
+              forms = len(re.findall(r"<form\b", html, re.I))
+              closes = len(re.findall(r"</form\s*>", html, re.I))
+              tokens = len(re.findall(r"""name=["']csrf_token["']""", html))
               assert forms == closes, f"{name}: form tags mismatch ({forms} opens, {closes} closes)"
               assert forms == tokens, f"{name}: expected one CSRF token per form, found {tokens} for {forms} forms"
-              assert not re.search(r"<form\\b[^>]*>[^<]*<form\\b", html, re.I), f"{name}: nested form detected"
+              assert not re.search(r"<form\b[^>]*>[^<]*<form\b", html, re.I), f"{name}: nested form detected"
 
-          print("PASS: Python syntax, 8 POST route CSRF guards, and POST form token structure.")
+          print("PASS: Python syntax, 8 POST route CSRF guards, and form token structure.")
           PY
