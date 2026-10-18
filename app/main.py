@@ -4,6 +4,7 @@ import secrets
 import hashlib
 import tempfile
 import zipfile
+import logging
 from pathlib import Path
 from urllib.parse import quote
 
