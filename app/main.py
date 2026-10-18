@@ -288,6 +288,21 @@ def index(request: Request, q: str = "", resource_type: str = ""):
     return page(request, "index.html", user=user, items=resources, resources=resources, q=q, resource_type=resource_type)
 
 
+@app.get("/resource/{resource_id}", response_class=HTMLResponse)
+def resource_detail(request: Request, resource_id: int):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    with db_connect() as conn:
+        resource = conn.execute(
+            "SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.id=%s AND r.status='approved'",
+            (resource_id,),
+        ).fetchone()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+    return page(request, "resource_detail.html", user=user, r=resource)
+
+
 @app.get("/register", response_class=HTMLResponse)
 def register_page(request: Request):
     return page(request, "register.html", error=None)
