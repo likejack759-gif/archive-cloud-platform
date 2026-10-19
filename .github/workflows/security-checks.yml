@@ -3,10 +3,12 @@ name: Security checks
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
   push:
     branches:
       - security/csrf-login-upload-guards
       - fix/accurate-upload-size-errors
+      - docs/deployment-config-alignment
 
 permissions:
   contents: read
@@ -41,6 +43,19 @@ jobs:
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt pytest
+
+      - name: Validate Docker Compose deployment configuration
+        env:
+          SECRET_KEY: ci-only-secret-key
+          ADMIN_PASSWORD: ci-only-admin-password
+          POSTGRES_USER: archive_app
+          POSTGRES_PASSWORD: ci-only-postgres-password
+          POSTGRES_DB: archive_platform
+          DATABASE_URL: postgresql://archive_app:ci-only-postgres-password@db:5432/archive_platform
+          AWS_ENDPOINT_URL_S3: https://s3.example.invalid
+          AWS_ACCESS_KEY_ID: ci-only-access-key
+          AWS_SECRET_ACCESS_KEY: ci-only-secret-key
+        run: docker compose config --quiet
 
       - name: Check Python syntax
         run: python -m compileall -q app tests
