@@ -1,53 +1,79 @@
-# 云端压缩包资源平台（可运行基础版）
+# 云端压缩包资源平台
 
-功能：
-- 邀请码注册（邀请码由管理员创建，可设置使用次数）
-- 用户登录/退出
-- 用户提交资源：名称、说明、封面图、ZIP/7Z/RAR 压缩包
-- 管理员审核、批准或拒绝
-- 只有已批准资源会出现在资源列表中
-- 登录用户可下载已批准资源
-- 文件存储在 data/，数据库在 data/app.db
-- Docker 自动重启并持久化数据
+这是基于 FastAPI、PostgreSQL 和 S3 兼容对象存储的多人资源平台。功能包括邀请码注册、用户登录、资源提交、管理员审核、已审核资源浏览与下载。
 
-## 重要安全说明
-这是可运行的基础版本，不应在未配置 HTTPS、强密码、备份和反向代理限制的情况下直接暴露到公网。
-- 上传文件扩展名和大小会校验，但不会自动扫描恶意文件。
-- 不要解压用户上传的压缩包到服务器。
-- 生产部署建议使用 Caddy/Nginx 配置 HTTPS，并把 `SESSION_HTTPS_ONLY=true`。
-- SQLite 适合小规模起步；高并发时可迁移到 PostgreSQL/对象存储。
-- 管理员密码在首次启动时从 `.env` 读取；若管理员账号已存在，改环境变量不会自动重置数据库中的密码。
-- 需定期备份整个 `data/` 目录。
+## 当前架构（请先读）
 
-## 本地或 VPS 部署
-1. 安装 Docker Engine 和 Docker Compose 插件。
-2. 将项目上传到服务器并进入项目目录。
-3. 复制环境配置：
-   `cp .env.example .env`
-4. 编辑 `.env`，设置长随机 `SECRET_KEY` 和强 `ADMIN_PASSWORD`。
-   生成随机密钥示例：`openssl rand -hex 32`
-5. 启动：
-   `docker compose up -d --build`
-6. 查看日志：
-   `docker compose logs -f`
-7. 打开 `http://服务器IP:8000`。
+当前 `app/main.py` **不是旧版 SQLite + 本地 `data/` 文件存储架构**。它启动时要求 `SECRET_KEY` 和 `DATABASE_URL`，数据库使用 PostgreSQL；压缩包和封面保存在 S3 兼容对象存储中。仅复制旧版的 `.env.example` 并执行 `docker compose up` 不足以启动当前版本。
+
+- PostgreSQL：保存用户、邀请码、资源元数据和审核状态。
+- S3 兼容对象存储：保存资源文件和封面。需要单独提供 endpoint、bucket、region 和访问凭据。
+- 应用容器：运行 FastAPI/Uvicorn。
+- `/health`：检查数据库连接，并报告对象存储配置是否存在；**它不会真正执行对象存储读写**，因此 `storage=configured` 不等于上传/下载链路已通过验证。
+
+## 使用 Docker Compose 部署
+
+需要安装 Docker Engine 和 Docker Compose 插件，并先准备一个 PostgreSQL 可用的环境以及一个 S3 兼容对象存储 bucket。Compose 会启动应用和 PostgreSQL；对象存储需要你另行选择和配置。
+
+1. 复制环境模板：
+
+   ```sh
+   cp .env.example .env
+   ```
+
+2. 编辑 `.env`，至少设置：
+   - 长随机的 `SECRET_KEY`
+   - 唯一且强的 `ADMIN_PASSWORD`
+   - `POSTGRES_PASSWORD`（使用 URL 安全字符，例如字母和数字；并将同一值填入 `DATABASE_URL`）
+   - 有效的 `AWS_ENDPOINT_URL_S3`、`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_REGION` 和 `S3_BUCKET`
+
+   `DATABASE_URL` 中的用户名、密码、数据库名必须与 PostgreSQL 服务的 `POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB` 一致。若密码含有 URL 特殊字符，必须先对连接串中的密码部分做 URL 编码。
+
+3. 生成随机会话密钥的示例：
+
+   ```sh
+   openssl rand -hex 32
+   ```
+
+4. 启动：
+
+   ```sh
+   docker compose up -d --build
+   docker compose ps
+   docker compose logs -f resource-platform
+   ```
+
+5. 访问 `http://服务器地址:8000`。正式公网使用前，应配置 HTTPS 反向代理、防火墙规则和可靠的备份；不要将数据库端口直接暴露到公网。
 
 ## 首次使用
+
 1. 用 `.env` 中的管理员账号密码登录。
-2. 进入“管理后台”创建邀请码。
-3. 将邀请码发给允许加入的用户。
-4. 用户注册并登录，提交压缩包和封面。
-5. 管理员在审核队列批准后，资源会显示在首页并允许下载。
+2. 在管理后台创建邀请码。
+3. 用户使用邀请码注册并登录。
+4. 用户提交资源，管理员审核通过后资源才会公开显示并允许下载。
 
-## 公网部署建议
-- 购买或申请一台 Linux VPS，确保有足够磁盘空间。
-- 配置域名 DNS 指向 VPS。
-- 在服务器上用 Caddy 或 Nginx 配置 HTTPS 反向代理到 `127.0.0.1:8000`。
-- 配好 HTTPS 后，在 `.env` 中设 `SESSION_HTTPS_ONLY=true` 并重启。
-- 不建议直接把 8000 端口裸露到公网；生产环境可将 compose 的 ports 改为 `127.0.0.1:8000:8000`，只让反向代理访问。
-- 限制反向代理请求体大小时，要确保其与 `MAX_UPLOAD_MB` 一致。
+## 上传限制与存储费用
 
-## 备份与更新
-备份：`tar -czf resource-backup-$(date +%F).tar.gz data .env`
-更新代码后：`docker compose up -d --build`
-停止：`docker compose down`
+- `MAX_UPLOAD_MB` 是**单个压缩包/APK 的上传大小上限**，不是平台总存储配额。
+- 当前代码没有实现平台级 5 GB 总容量限制。若目标是所有用户合计不超过 5 GB，需要单独实现并测试配额逻辑；不能仅靠单文件限制保证。
+- 对象存储费用、免费额度、请求费用、流量费用、生命周期策略及恢复能力由你选择的存储提供商决定。**本项目不能保证总费用为 $0/月**；设置环境变量也不会自动获得免费存储。
+- 当前代码主要检查文件扩展名和部分文件签名，没有完整的恶意软件扫描。不要解压用户上传的压缩包到应用服务器。
+
+## 备份与恢复
+
+数据库和对象存储必须分别备份；仅备份代码或数据库不包含上传文件。
+
+- PostgreSQL：使用 `pg_dump` 定期导出，并把备份存放在独立且受保护的位置。
+- 对象存储：确认提供商是否支持版本控制/生命周期/独立备份，并定期验证对象可恢复性。
+- 将 `.env` 作为敏感凭据妥善保管，**不要提交到 GitHub 或放入公开备份**。
+- 在没有完成恢复演练前，不要把备份方案视为已验证。
+
+## 更新与停止
+
+```sh
+docker compose up -d --build
+docker compose logs -f resource-platform
+docker compose down
+``
+
+`docker compose down` 不会删除命名 PostgreSQL 卷。不要使用 `docker compose down -v`，除非你明确希望删除数据库卷并已确认备份。
