@@ -86,4 +86,4 @@ def test_index_rejects_unrecognized_sort_value(monkeypatch):
     sql, _params = connection.calls[0]
     assert "ORDER BY r.created_at DESC, r.id DESC" in sql
     assert "DROP TABLE" not in sql
-    assert context["sort"] == "downloads DESC; DROP TABLE users"
+    assert context["sort"] == "latest"
