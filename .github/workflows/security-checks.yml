@@ -2,12 +2,13 @@ name: Security checks
 
 on:
   pull_request:
-    branches: [main, ui/game-community-redesign]
+    branches: [main, ui/game-community-redesign, features/community-hub]
   push:
     branches:
       - security/csrf-login-upload-guards
       - fix/accurate-upload-size-errors
       - features/community-hub
+      - ui/original-deep-space
 
 permissions:
   contents: read
