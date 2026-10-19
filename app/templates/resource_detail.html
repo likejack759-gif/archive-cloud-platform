@@ -1,9 +1,9 @@
 {% extends "base.html" %}{% block title %}{{ r.name }} · 云端资源库{% endblock %}{% block content %}
 <div class="row" style="margin:4px 0 16px"><a href="/" class="muted">← 返回资源库</a><span class="muted">/ 资源详情</span></div>
-<section class="panel" style="overflow:hidden;padding:0">
+<section class="panel detail-shell" style="overflow:hidden;padding:0">
 {% if r.cover_filename %}<img src="/covers/{{ r.cover_filename }}" alt="{{ r.name }} 封面" style="display:block;width:100%;max-height:420px;object-fit:cover;background:#edf4ff">{% else %}<div style="display:grid;place-items:center;min-height:180px;background:linear-gradient(120deg,#eef5ff,#dceaff);color:#82a9e8;font-size:54px">✦</div>{% endif %}
 <div style="padding:clamp(18px,4vw,34px)">
-<div class="tag">RESOURCE DETAIL</div><h1>{{ r.name }}</h1><div class="row" style="margin:12px 0 18px"><span class="tag">{{ '安卓应用 APK' if r.resource_type == 'apk' else '压缩包资源' }}</span><span class="tag">{{ "%.1f"|format(r.size_bytes/1048576) }} MB</span><span class="tag">↓ {{ r.downloads }} 次下载</span></div>
+<div class="page-kicker">RESOURCE DETAIL · COMMUNITY LIBRARY</div><h1>{{ r.name }}</h1><div class="row" style="margin:12px 0 18px"><span class="tag">{{ '安卓应用 APK' if r.resource_type == 'apk' else '压缩包资源' }}</span><span class="tag">{{ "%.1f"|format(r.size_bytes/1048576) }} MB</span><span class="tag">↓ {{ r.downloads }} 次下载</span></div>
 {% if r.description %}<h2>资源说明</h2><p style="white-space:pre-wrap;overflow-wrap:anywhere">{{ r.description }}</p>{% else %}<p class="muted">提交者暂未填写资源说明。</p>{% endif %}
 <div style="height:1px;background:#e3ebf6;margin:22px 0"></div>
 <div class="row between"><div><div class="muted small">文件名称</div><strong style="overflow-wrap:anywhere">{{ r.original_filename }}</strong><div class="muted small" style="margin-top:8px">分享者：{{ r.owner_name }}</div></div><a class="btn" href="/download/{{ r.id }}">↓ 下载资源</a></div>
