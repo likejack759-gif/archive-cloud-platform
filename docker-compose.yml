@@ -34,7 +34,7 @@ services:
       AWS_REGION: ${AWS_REGION:-us-east-2}
       S3_BUCKET: ${S3_BUCKET:-archive-files}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
-      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
 
 volumes:
   postgres_data:
