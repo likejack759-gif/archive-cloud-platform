@@ -93,6 +93,30 @@ input,textarea,select{min-width:0}
   .resource .row .btn{font-size:14px;padding:10px 12px}
 }
 
+
+/* Personal center and admin tables on phones */
+.page-heading{min-width:0;flex:1}
+.page-heading p{max-width:680px}
+.admin-stats .panel{padding:16px}
+.admin-section-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.admin-action-form{min-width:210px}
+@media(max-width:640px){
+  .page-heading{width:100%}
+  .page-heading h1{font-size:29px}
+  .page-heading-actions{width:100%}
+  .page-heading-actions .btn{flex:1}
+  .admin-stats{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:10px}
+  .admin-stats .panel{padding:13px}
+  .admin-stats .stat-value{font-size:25px!important}
+  .table-wrap table{min-width:640px}
+  .table-wrap th,.table-wrap td{padding:10px;font-size:13px}
+  .admin-review-form input{min-width:180px}
+  .admin-review-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .admin-review-actions button{flex:1;min-width:92px}
+  .admin-section-title h2{font-size:18px}
+  .admin-section-title .tag{white-space:normal}
+}
+
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 </style>
 </head><body><div class="wrap">
