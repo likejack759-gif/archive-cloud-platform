@@ -1,16 +1,40 @@
 services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-archive_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-archive_platform}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-archive_app} -d ${POSTGRES_DB:-archive_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # Intentionally do not publish the database port to the host.
+
   resource-platform:
     build: .
-    container_name: cloud-resource-platform
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
-      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
-      DATA_DIR: /data
-    volumes:
-      - ./data:/data
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      AWS_ENDPOINT_URL_S3: ${AWS_ENDPOINT_URL_S3:?Set AWS_ENDPOINT_URL_S3 in .env}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID in .env}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY in .env}
+      AWS_REGION: ${AWS_REGION:-us-east-2}
+      S3_BUCKET: ${S3_BUCKET:-archive-files}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-500}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
+
+volumes:
+  postgres_data:
