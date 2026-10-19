@@ -2,11 +2,12 @@ name: Security checks
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, ui/game-community-redesign]
   push:
     branches:
       - security/csrf-login-upload-guards
       - fix/accurate-upload-size-errors
+      - features/community-hub
 
 permissions:
   contents: read
@@ -47,6 +48,9 @@ jobs:
 
       - name: Run security guard unit tests
         run: python -m pytest -q tests/test_security_guards.py
+
+      - name: Run community plaza tests
+        run: python -m pytest -q tests/test_community_plaza.py
 
       - name: Run upload cleanup regression tests
         run: python -m pytest -q tests/test_upload_cleanup.py

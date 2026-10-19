@@ -379,22 +379,45 @@ def stream_s3_object(key: str, filename: str, content_type: str):
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request, q: str = "", resource_type: str = ""):
+def index(request: Request, q: str = "", resource_type: str = "", sort: str = "latest"):
     user = current_user(request)
     where = ["r.status='approved'"]
     params = []
-    if q.strip():
-        where.append("(r.name ILIKE %s OR r.description ILIKE %s)")
-        params.extend([f"%{q.strip()}%", f"%{q.strip()}%"])
-    if resource_type.strip():
+    query_text = q.strip()[:100]
+    if query_text:
+        where.append("(r.name ILIKE %s OR r.description ILIKE %s OR r.original_filename ILIKE %s)")
+        pattern = f"%{query_text}%"
+        params.extend([pattern, pattern, pattern])
+    if resource_type in {"archive", "apk"}:
         where.append("r.resource_type=%s")
-        params.append(resource_type.strip())
+        params.append(resource_type)
+    sort = sort if sort in {"latest", "popular", "name"} else "latest"
+    order_by = {
+        "latest": "r.created_at DESC, r.id DESC",
+        "popular": "r.downloads DESC, r.created_at DESC",
+        "name": "LOWER(r.name) ASC, r.created_at DESC",
+    }.get(sort, "r.created_at DESC, r.id DESC")
+    where_sql = " AND ".join(where)
     with db_connect() as conn:
         resources = conn.execute(
-            "SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE " + " AND ".join(where) + " ORDER BY r.created_at DESC LIMIT 100",
+            "SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE "
+            + where_sql + " ORDER BY " + order_by + " LIMIT 100",
             tuple(params),
         ).fetchall()
-    return page(request, "index.html", user=user, items=resources, resources=resources, q=q, resource_type=resource_type)
+        popular = conn.execute(
+            "SELECT r.id, r.name, r.resource_type, r.downloads FROM resources r "
+            "WHERE r.status='approved' ORDER BY r.downloads DESC, r.created_at DESC LIMIT 5"
+        ).fetchall()
+        stats = conn.execute(
+            "SELECT COUNT(*) AS resources, COALESCE(SUM(downloads),0) AS downloads, "
+            "COUNT(*) FILTER (WHERE resource_type='apk') AS apps, "
+            "COUNT(*) FILTER (WHERE resource_type <> 'apk') AS archives "
+            "FROM resources WHERE status='approved'"
+        ).fetchone()
+    return page(
+        request, "index.html", user=user, items=resources, resources=resources,
+        q=query_text, resource_type=resource_type, sort=sort, popular=popular, stats=stats,
+    )
 
 
 @app.get("/resource/{resource_id}", response_class=HTMLResponse)
