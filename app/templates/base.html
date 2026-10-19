@@ -56,6 +56,67 @@ code{background:#eef4ff;color:#315c9f;padding:3px 6px;border-radius:6px}
 .footer{padding:30px 0 18px;color:#8a9ab1;font-size:12px;text-align:center}
 @media(max-width:640px){.wrap{padding:13px}header{align-items:flex-start;margin-bottom:18px}.brand{font-size:18px}nav{gap:3px}nav>a{padding:7px 8px;font-size:13px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.resource-body{padding:11px}.resource h3{font-size:15px}.panel{padding:15px;border-radius:16px}h2{font-size:19px}.cover{aspect-ratio:3/2}button,.btn{padding:10px 12px}}
 @media(max-width:380px){.grid{grid-template-columns:1fr}.cover{aspect-ratio:16/9}}
+
+/* Mobile-first polish and keyboard accessibility */
+:focus-visible{outline:3px solid rgba(52,120,246,.55);outline-offset:3px}
+button,.btn,nav>a{min-height:42px}
+button:active,.btn:active{transform:translateY(0)}
+::selection{background:#d8e8ff;color:#173a70}
+img{max-width:100%}
+.panel{scroll-margin-top:16px}
+.resource{height:100%;display:flex;flex-direction:column}
+.resource-body{display:flex;flex:1;flex-direction:column}
+.resource-body>.row:last-child{margin-top:auto}
+.resource-body p{overflow-wrap:anywhere}
+input,textarea,select{min-width:0}
+.table-wrap{-webkit-overflow-scrolling:touch}
+@media(max-width:520px){
+  .wrap{padding:12px}
+  header{gap:12px;padding-bottom:14px}
+  .brand{gap:9px}
+  .logo{width:40px;height:40px;border-radius:13px}
+  nav{width:100%;gap:5px}
+  nav>a{padding:8px 10px}
+  nav form.inline{margin-left:auto}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .resource-body{padding:12px}
+  .resource h3{font-size:14px;line-height:1.45}
+  .resource .row{gap:6px}
+  .resource .row .btn{padding:9px 8px;font-size:12px}
+  .panel{margin:12px 0}
+  .empty{padding:28px 15px}
+}
+@media(max-width:390px){
+  .grid{grid-template-columns:1fr}
+  .resource .cover{aspect-ratio:16/9}
+  .resource h3{font-size:16px}
+  .resource .row .btn{font-size:14px;padding:10px 12px}
+}
+
+
+/* Personal center and admin tables on phones */
+.page-heading{min-width:0;flex:1}
+.page-heading p{max-width:680px}
+.admin-stats .panel{padding:16px}
+.admin-section-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.admin-action-form{min-width:210px}
+@media(max-width:640px){
+  .page-heading{width:100%}
+  .page-heading h1{font-size:29px}
+  .page-heading-actions{width:100%}
+  .page-heading-actions .btn{flex:1}
+  .admin-stats{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:10px}
+  .admin-stats .panel{padding:13px}
+  .admin-stats .stat-value{font-size:25px!important}
+  .table-wrap table{min-width:640px}
+  .table-wrap th,.table-wrap td{padding:10px;font-size:13px}
+  .admin-review-form input{min-width:180px}
+  .admin-review-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .admin-review-actions button{flex:1;min-width:92px}
+  .admin-section-title h2{font-size:18px}
+  .admin-section-title .tag{white-space:normal}
+}
+
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 </style>
 </head><body><div class="wrap">
