@@ -26,6 +26,7 @@
    - 唯一且强的 `ADMIN_PASSWORD`
    - `POSTGRES_PASSWORD`（使用 URL 安全字符，例如字母和数字；并将同一值填入 `DATABASE_URL`）
    - 有效的 `AWS_ENDPOINT_URL_S3`、`AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_REGION` 和 `S3_BUCKET`
+   - 本地直接通过 HTTP 测试时保持 `SESSION_HTTPS_ONLY=false`；只有 HTTPS 反向代理已经正确工作后才设为 `true`。不要在没有 HTTPS 的情况下启用 Secure 会话 Cookie，否则浏览器不会在普通 HTTP 下发送登录会话。
 
    `DATABASE_URL` 中的用户名、密码、数据库名必须与 PostgreSQL 服务的 `POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB` 一致。若密码含有 URL 特殊字符，必须先对连接串中的密码部分做 URL 编码。
 
