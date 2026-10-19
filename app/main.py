@@ -391,6 +391,7 @@ def index(request: Request, q: str = "", resource_type: str = "", sort: str = "l
     if resource_type in {"archive", "apk"}:
         where.append("r.resource_type=%s")
         params.append(resource_type)
+    sort = sort if sort in {"latest", "popular", "name"} else "latest"
     order_by = {
         "latest": "r.created_at DESC, r.id DESC",
         "popular": "r.downloads DESC, r.created_at DESC",
