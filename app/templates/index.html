@@ -1,28 +1,41 @@
-{% extends "base.html" %}{% block title %}资源首页 · 云端资源库{% endblock %}{% block content %}
-<section class="panel" style="position:relative;overflow:hidden;padding:clamp(22px,5vw,48px);background:linear-gradient(115deg,#fff 0%,#f7faff 56%,#e8f2ff 100%);">
-  <div style="position:absolute;right:-34px;top:-55px;width:230px;height:230px;border:1px solid #d5e6ff;border-radius:50%;box-shadow:0 0 0 28px rgba(220,235,255,.35),0 0 0 58px rgba(220,235,255,.22);pointer-events:none"></div>
-  <div style="position:relative;max-width:760px">
-    <div class="tag">✦ CLOUD FILE CENTER · RESOURCE HUB</div>
-    <h1 style="margin-top:18px">让每一份资源，<br><span style="color:#3478f6">都触手可及。</span></h1>
-    <p class="muted" style="max-width:570px;margin-bottom:22px">统一收藏、审核与分发你需要的压缩包和安卓应用。资源经过管理员审核后开放下载，方便在手机上随时访问。</p>
-    <div class="row">{% if user %}<a class="btn" href="/submit">＋ 提交新资源</a><a class="btn secondary" href="/my-resources">查看个人中心</a>{% else %}<a class="btn" href="/login">登录资源库 →</a><a class="btn secondary" href="/register">邀请码注册</a>{% endif %}</div>
+{% extends "base.html" %}{% block title %}资源广场 · 云端资源库{% endblock %}{% block content %}
+<section class="hero">
+  <div class="hero-content">
+    <div class="page-kicker">✦ CLOUD RESOURCE COMMUNITY</div>
+    <h1>发现值得收藏的资源，<br><span class="hero-title-accent">让分享连接每一次灵感。</span></h1>
+    <p class="hero-lead">一个为压缩包、安卓应用与数字资源打造的共享空间。浏览精选内容、发布你的收藏，所有公开资源都经过管理员审核。</p>
+    <div class="hero-actions">
+      {% if user %}<a class="btn" href="/submit">＋ 发布资源</a><a class="btn secondary" href="/my-resources">我的投稿 →</a>
+      {% else %}<a class="btn" href="/login">进入资源广场 →</a><a class="btn secondary" href="/register">邀请码注册</a>{% endif %}
+    </div>
+    <div class="hero-meta"><span>✦ 社区共享</span><span>✓ 审核后开放</span><span>↧ 手机友好下载</span></div>
   </div>
 </section>
 {% if user %}
-<section class="panel">
-  <div class="row between"><div><h2 style="margin-bottom:3px">搜索资源</h2><div class="muted small">按资源名称或说明快速查找</div></div><span class="tag">资源探索</span></div>
-  <form method="get" action="/" class="row" style="margin-top:10px"><div style="flex:1;min-width:180px"><input name="q" value="{{ q }}" placeholder="输入资源名称或关键词…" style="margin-bottom:0"></div><button type="submit">搜索资源</button>{% if q %}<a class="btn secondary" href="/">清除</a>{% endif %}</form>
+<section class="feature-strip" aria-label="平台功能">
+  <article class="feature-card"><div class="feature-icon">⌕</div><h3>快速发现</h3><p>按名称或关键词搜索资源</p></article>
+  <article class="feature-card"><div class="feature-icon">↥</div><h3>分享收藏</h3><p>上传文件并补充封面说明</p></article>
+  <article class="feature-card"><div class="feature-icon">✓</div><h3>审核保障</h3><p>管理员审核通过后开放下载</p></article>
 </section>
-<h2 style="margin:28px 0 14px">资源库 <span class="tag">{{ items|length }} 项已审核</span></h2>
+<section class="panel">
+  <div class="resource-toolbar">
+    <div><div class="page-kicker">EXPLORE LIBRARY</div><h2 style="margin:4px 0 0">探索资源</h2><div class="muted small">按资源名称、文件名或说明快速查找</div></div>
+    <form method="get" action="/" class="row"><div style="flex:1;min-width:180px"><input name="q" value="{{ q }}" placeholder="搜索资源名称或关键词…" aria-label="搜索资源" style="margin-bottom:0"></div><button type="submit">搜索</button>{% if q %}<a class="btn secondary" href="/">清除</a>{% endif %}</form>
+  </div>
+</section>
+<div class="section-heading"><div><div class="page-kicker">COMMUNITY LIBRARY</div><h2>资源广场</h2></div><span class="tag">{{ items|length }} 项已审核资源</span></div>
 {% if items %}<div class="grid">{% for r in items %}<article class="panel resource">
 {% if r.cover_filename %}<img class="cover" src="/covers/{{ r.cover_filename }}" alt="{{ r.name }} 封面" loading="lazy">{% else %}<div class="cover" style="display:grid;place-items:center;color:#7da3dc;font-size:44px">✦</div>{% endif %}
-<div class="resource-body"><div class="tag" style="margin-bottom:9px">资源档案</div><h3><a href="/resource/{{ r.id }}" style="color:inherit">{{ r.name }}</a></h3><p class="muted small" style="margin:0 0 10px;overflow-wrap:anywhere">{{ r.original_filename }}</p>{% if r.description %}<p class="small" style="color:#60738e;margin:10px 0 14px;overflow-wrap:anywhere">{{ r.description }}</p>{% endif %}<div class="row"><span class="tag">{{ "%.1f"|format(r.size_bytes/1048576) }} MB</span><span class="tag">↓ {{ r.downloads }} 次</span></div><p class="muted small" style="margin:12px 0">分享者：{{ r.owner_name }}</p><div class="row" style="display:grid;grid-template-columns:1fr 1fr"><a class="btn secondary" href="/resource/{{ r.id }}">查看详情</a><a class="btn" href="/download/{{ r.id }}">↓ 下载</a></div></div></article>{% endfor %}</div>
-{% else %}<div class="empty"><div style="font-size:30px;margin-bottom:8px;color:#8eb4f0">✦</div>{% if q %}没有找到匹配“{{ q }}”的资源。{% else %}资源库正在等待第一份已审核资源。{% endif %}<p class="small">管理员批准用户提交的资源后，会在这里展示。</p></div>{% endif %}
+<div class="resource-body"><div class="row between" style="margin-bottom:9px"><span class="tag">{{ '安卓应用' if r.resource_type == 'apk' else '资源档案' }}</span><span class="muted small">↓ {{ r.downloads }}</span></div><h3><a href="/resource/{{ r.id }}" style="color:inherit">{{ r.name }}</a></h3><p class="muted small" style="margin:0 0 10px;overflow-wrap:anywhere">{{ r.original_filename }}</p>{% if r.description %}<p class="small" style="color:#60738e;margin:10px 0 14px;overflow-wrap:anywhere">{{ r.description }}</p>{% endif %}<div class="row"><span class="tag">{{ "%.1f"|format(r.size_bytes/1048576) }} MB</span></div><p class="muted small" style="margin:12px 0">分享者：{{ r.owner_name }}</p><div class="row" style="display:grid;grid-template-columns:1fr 1fr"><a class="btn secondary" href="/resource/{{ r.id }}">查看详情</a><a class="btn" href="/download/{{ r.id }}">↓ 下载</a></div></div></article>{% endfor %}</div>
+{% else %}<div class="empty"><div style="font-size:32px;margin-bottom:8px;color:#8eb4f0">✦</div>{% if q %}没有找到匹配“{{ q }}”的资源。{% else %}资源广场正在等待第一份已审核资源。{% endif %}<p class="small">管理员批准用户提交的资源后，会在这里展示。</p>{% if user %}<a class="btn" href="/submit">提交第一份资源</a>{% endif %}</div>{% endif %}
 {% else %}
-<section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr));margin-top:18px">
-<article class="panel"><div class="tag">01 · BROWSE</div><h2 style="margin-top:12px">浏览资源</h2><p class="muted small">登录后查看已审核的资源档案与文件信息。</p></article>
-<article class="panel"><div class="tag">02 · CONTRIBUTE</div><h2 style="margin-top:12px">提交分享</h2><p class="muted small">使用账号提交压缩包或 APK，并附上封面和说明。</p></article>
-<article class="panel"><div class="tag">03 · REVIEW</div><h2 style="margin-top:12px">审核后开放</h2><p class="muted small">所有提交内容经管理员审核，通过后才允许下载。</p></article>
+<section class="feature-strip" aria-label="平台流程">
+  <article class="feature-card"><div class="feature-icon">01</div><h3>浏览发现</h3><p>登录后查看已审核的资源档案与文件信息。</p></article>
+  <article class="feature-card"><div class="feature-icon">02</div><h3>投稿分享</h3><p>使用账号提交压缩包或 APK，并附上封面说明。</p></article>
+  <article class="feature-card"><div class="feature-icon">03</div><h3>审核开放</h3><p>管理员审核通过后，资源才会对登录用户开放下载。</p></article>
 </section>
-<div class="panel" style="background:linear-gradient(110deg,#f2f7ff,#fff);"><h2>欢迎来到云端资源库</h2><p class="muted">本平台采用邀请码注册。请先登录，或使用管理员提供的邀请码创建账号。</p><div class="row"><a class="btn" href="/login">登录账号</a><a class="btn secondary" href="/register">邀请码注册</a></div></div>
+<section class="panel" style="display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap">
+  <div><div class="page-kicker">JOIN THE COMMUNITY</div><h2 style="margin:5px 0">把你的资源收藏带进社区</h2><p class="muted" style="margin:0">平台采用邀请码注册，请使用管理员提供的邀请码创建账号。</p></div>
+  <div class="hero-actions"><a class="btn" href="/login">登录账号</a><a class="btn secondary" href="/register">邀请码注册</a></div>
+</section>
 {% endif %}{% endblock %}
