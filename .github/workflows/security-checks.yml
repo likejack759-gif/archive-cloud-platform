@@ -95,6 +95,28 @@ jobs:
 
           assert len(post_routes) == 8, f"Expected 8 POST routes, found {len(post_routes)}"
           assert len(post_routes) == len(set(post_routes)), "Duplicate POST route function names"
+          required_post_routes = {"login", "logout", "submit_resource"}
+          assert required_post_routes.issubset(set(post_routes)), (
+              f"Missing required POST routes: {required_post_routes - set(post_routes)}"
+          )
+          get_routes = {
+              node.name: [
+                  dec.args[0].value
+                  for dec in node.decorator_list
+                  if isinstance(dec, ast.Call)
+                  and isinstance(dec.func, ast.Attribute)
+                  and isinstance(dec.func.value, ast.Name)
+                  and dec.func.value.id == "app"
+                  and dec.func.attr == "get"
+                  and dec.args
+                  and isinstance(dec.args[0], ast.Constant)
+              ]
+              for node in tree.body
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+          }
+          assert "/submit" in get_routes.get("submit_page", []), (
+              "Missing GET /submit page route"
+          )
 
           template_paths = [
               "app/templates/base.html",
