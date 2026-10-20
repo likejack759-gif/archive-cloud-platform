@@ -489,6 +489,30 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
         user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (username.strip(),)).fetchone()
     if not user or not verify_password(password, user["password_hash"]):
         retry_after = record_login_failure(key)
+        if retry_after:
+            return page(request, "login.html", error=f"登录失败次数过多，账号和当前网络组合已暂时限制登录，请在 {retry_after} 秒后重试。")
+        return page(request, "login.html", error="用户名或密码不正确。")
+    clear_login_failures(key)
+    request.session.clear()
+    request.session["user_id"] = user["id"]
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/logout")
+def logout(request: Request, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    request.session.clear()
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/submit", response_class=HTMLResponse)
+def submit_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error=None)
+
+
 @app.post("/submit")
 async def submit_resource(
     request: Request,
