@@ -370,7 +370,8 @@ def clamav_scan(path: str) -> tuple[str, str]:
 def _safe_archive_member(info: zipfile.ZipInfo) -> tuple[bool, str]:
     name = info.filename.replace("\\", "/")
     normalized = normpath(name)
-    if name.startswith("/") or normalized == ".." or normalized.startswith("../") or "/../" in f"/{normalized}/":
+    parts = name.split("/")
+    if name.startswith("/") or (parts and ":" in parts[0]) or any(part == ".." for part in parts) or normalized == ".." or normalized.startswith("../"):
         return False, "路径穿越风险"
     mode = (info.external_attr >> 16) & 0xFFFF
     if (mode & 0o170000) == 0o120000:
