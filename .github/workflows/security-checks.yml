@@ -121,6 +121,7 @@ jobs:
           }
           assert "/submit" in get_routes.get("submit_page", []), (
               "Missing GET /submit page route"
+          )
 
           template_paths = [
               "app/templates/base.html",
