@@ -9,6 +9,7 @@ on:
       - fix/accurate-upload-size-errors
       - features/community-hub
       - ui/original-deep-space
+      - feature/platform-storage-quota
 
 permissions:
   contents: read
