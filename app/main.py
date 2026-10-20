@@ -339,7 +339,7 @@ def clamav_scan(path: str) -> tuple[str, str]:
     try:
         with socket.create_connection((CLAMAV_HOST, CLAMAV_PORT), timeout=CLAMAV_TIMEOUT_SECONDS) as sock:
             sock.settimeout(CLAMAV_TIMEOUT_SECONDS)
-            sock.sendall(b"zINSTREAM\\0")
+            sock.sendall(b"zINSTREAM\0")
             with open(path, "rb") as source:
                 while True:
                     chunk = source.read(1024 * 1024)
@@ -354,9 +354,9 @@ def clamav_scan(path: str) -> tuple[str, str]:
                 if not part:
                     break
                 response.extend(part)
-                if b"\\0" in part:
+                if b"\0" in part:
                     break
-        result = bytes(response).decode("utf-8", "replace").strip("\\0\\r\\n ")
+        result = bytes(response).decode("utf-8", "replace").strip("\0\r\n ")
         if result.endswith("OK"):
             return "clean", result[:200]
         if "FOUND" in result:
@@ -368,7 +368,7 @@ def clamav_scan(path: str) -> tuple[str, str]:
 
 
 def _safe_archive_member(info: zipfile.ZipInfo) -> tuple[bool, str]:
-    name = info.filename.replace("\\\\", "/")
+    name = info.filename.replace("\\", "/")
     normalized = normpath(name)
     if name.startswith("/") or normalized == ".." or normalized.startswith("../") or "/../" in f"/{normalized}/":
         return False, "路径穿越风险"
