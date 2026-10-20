@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from psycopg.rows import dict_row
 from psycopg.errors import IntegrityError
+from app.storage_quota import MAX_STORAGE_BYTES, would_exceed_quota
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -133,6 +134,7 @@ def init_db():
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS cover_filename TEXT")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS downloads BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS cover_size_bytes BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT ''")
@@ -357,6 +359,22 @@ def s3_put(local_path: str, key: str, content_type: str):
     client.upload_file(local_path, S3_BUCKET, key, ExtraArgs={"ContentType": content_type})
 
 
+def s3_total_bytes() -> int:
+    """Return actual object bytes in the bucket, including covers and orphaned uploads."""
+    client = s3_client()
+    total = 0
+    request = {"Bucket": S3_BUCKET}
+    while True:
+        response = client.list_objects_v2(**request)
+        total += sum(int(item.get("Size", 0)) for item in response.get("Contents", []))
+        if not response.get("IsTruncated"):
+            return total
+        token = response.get("NextContinuationToken")
+        if not token:
+            raise RuntimeError("Object storage returned a truncated listing without a continuation token")
+        request["ContinuationToken"] = token
+
+
 def s3_delete(key: str):
     """Delete an uploaded object; log failures so orphaned objects can be investigated."""
     try:
@@ -544,41 +562,56 @@ async def submit_resource(
     cover_path = None
     archive_key = None
     cover_key = None
+    archive_size = 0
+    cover_size = 0
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     try:
+        # Stage and validate all files before reserving quota or uploading anything.
         archive_path, archive_size = await save_upload_to_temp(archive, max_bytes, file_label="Archive")
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
-        archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
-        content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
-        s3_put(archive_path, archive_key, content_type)
+
+        cover_filename = None
+        cover_ext = None
+        cover_mime = None
         if cover and cover.filename:
             cover_filename = safe_name(cover.filename)
-            ext = Path(cover_filename).suffix.lower()
-            if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-                s3_delete(archive_key)
+            cover_ext = Path(cover_filename).suffix.lower()
+            if cover_ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
                 return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="封面只允许 JPG、PNG、WEBP 或 GIF 图片。")
-            cover_path, _ = await save_upload_to_temp(cover, 8 * 1024 * 1024, file_label="Cover image")
+            cover_path, cover_size = await save_upload_to_temp(cover, 8 * 1024 * 1024, file_label="Cover image")
             with open(cover_path, "rb") as f:
                 signature = f.read(12)
-            valid = (ext in {".jpg", ".jpeg"} and signature.startswith(b"\xff\xd8\xff")) or (ext == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (ext == ".gif" and signature.startswith((b"GIF87a", b"GIF89a"))) or (ext == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")
+            valid = (cover_ext in {".jpg", ".jpeg"} and signature.startswith(b"\xff\xd8\xff")) or (cover_ext == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (cover_ext == ".gif" and signature.startswith((b"GIF87a", b"GIF89a"))) or (cover_ext == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")
             if not valid:
-                s3_delete(archive_key)
                 return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="封面文件内容不是有效的支持格式图片。")
-            cover_key = f"covers/{secrets.token_hex(16)}{ext}"
-            mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}[ext]
-            s3_put(cover_path, cover_key, mime)
+            cover_mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}[cover_ext]
+
+        archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
+        cover_key = f"covers/{secrets.token_hex(16)}{cover_ext}" if cover_ext else None
+        content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
+        incoming_bytes = archive_size + cover_size
+
+        # Serialize quota check + object writes + DB insert across app workers.
+        # The transaction-level advisory lock remains held until commit/rollback.
         with db_connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (730214051,))
+            current_bytes = s3_total_bytes()
+            if would_exceed_quota(current_bytes, incoming_bytes):
+                raise HTTPException(
+                    status_code=413,
+                    detail="平台存储空间已满（总容量上限为 5 GiB），请联系管理员清理资源后再上传。",
+                )
+            s3_put(archive_path, archive_key, content_type)
+            if cover_path and cover_key and cover_mime:
+                s3_put(cover_path, cover_key, cover_mime)
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s)",
-                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,cover_size_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, cover_size),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
     except HTTPException:
-        # A validation/size error can happen after the archive has already been
-        # uploaded (for example, while saving or validating the optional cover).
-        # Best-effort cleanup prevents inaccessible objects from accumulating.
         if archive_key:
             s3_delete(archive_key)
         if cover_key:

@@ -32,7 +32,7 @@ def upload(filename, data):
     return UploadFile(filename=filename, file=f)
 
 
-def test_cover_size_http_exception_cleans_uploaded_archive(monkeypatch):
+def test_cover_size_http_exception_happens_before_any_upload(monkeypatch):
     uploaded_keys = []
     deleted_keys = []
     monkeypatch.setattr(main, "current_user", lambda _request: {"id": 7, "role": "user"})
@@ -56,8 +56,9 @@ def test_cover_size_http_exception_cleans_uploaded_archive(monkeypatch):
 
     assert exc.value.status_code == 413
     assert exc.value.detail == "Cover image exceeds 8 MiB limit"
-    assert len(uploaded_keys) == 1
-    assert deleted_keys == uploaded_keys
+    # All files are staged and validated before storage writes begin.
+    assert uploaded_keys == []
+    assert deleted_keys == []
 
 
 def test_s3_delete_logs_failure(monkeypatch, caplog):
