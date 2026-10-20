@@ -7,7 +7,10 @@ import zipfile
 import logging
 import time
 import threading
+import socket
+import struct
 from pathlib import Path
+from posixpath import normpath
 from urllib.parse import quote
 
 import boto3
@@ -135,6 +138,8 @@ def init_db():
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS downloads BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS cover_size_bytes BIGINT NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_status TEXT NOT NULL DEFAULT 'not_scanned'")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_result TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT ''")
@@ -303,6 +308,150 @@ def safe_name(name: str) -> str:
     name = Path(name or "upload.bin").name
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
     return (name or "upload.bin")[:180]
+
+
+
+CLAMAV_HOST = os.getenv("CLAMAV_HOST", "").strip()
+CLAMAV_PORT = int(os.getenv("CLAMAV_PORT", "3310"))
+CLAMAV_TIMEOUT_SECONDS = float(os.getenv("CLAMAV_TIMEOUT_SECONDS", "30"))
+MAX_ARCHIVE_INSPECT_ENTRIES = 2000
+MAX_TEXT_PREVIEW_BYTES = 64 * 1024
+TEXT_PREVIEW_SUFFIXES = {
+    ".txt", ".md", ".json", ".xml", ".html", ".htm", ".js", ".mjs",
+    ".css", ".py", ".sh", ".bat", ".ps1", ".yml", ".yaml", ".ini",
+    ".cfg", ".conf", ".properties", ".csv", ".log", ".sql", ".toml",
+}
+SUSPICIOUS_SUFFIXES = {
+    ".exe", ".dll", ".scr", ".com", ".bat", ".cmd", ".ps1", ".vbs",
+    ".vbe", ".js", ".jse", ".wsf", ".hta", ".msi", ".apk", ".jar",
+    ".so", ".dex", ".sh", ".lnk",
+}
+
+
+def clamav_scan(path: str) -> tuple[str, str]:
+    """Scan a staged file using a configured ClamAV clamd INSTREAM endpoint.
+
+    Return ('clean'|'infected'|'unavailable', short detail). Missing scanner
+    configuration is deliberately not treated as a clean result.
+    """
+    if not CLAMAV_HOST:
+        return "unavailable", "未配置 ClamAV 扫描服务"
+    try:
+        with socket.create_connection((CLAMAV_HOST, CLAMAV_PORT), timeout=CLAMAV_TIMEOUT_SECONDS) as sock:
+            sock.settimeout(CLAMAV_TIMEOUT_SECONDS)
+            sock.sendall(b"zINSTREAM\0")
+            with open(path, "rb") as source:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    sock.sendall(struct.pack("!I", len(chunk)))
+                    sock.sendall(chunk)
+            sock.sendall(struct.pack("!I", 0))
+            response = bytearray()
+            while len(response) < 4096:
+                part = sock.recv(1024)
+                if not part:
+                    break
+                response.extend(part)
+                if b"\0" in part:
+                    break
+        result = bytes(response).decode("utf-8", "replace").strip("\0\r\n ")
+        if result.endswith("OK"):
+            return "clean", result[:200]
+        if "FOUND" in result:
+            return "infected", result[:200]
+        return "unavailable", (result or "ClamAV 返回无法识别的结果")[:200]
+    except (OSError, TimeoutError, ValueError) as exc:
+        logging.warning("ClamAV scanner unavailable: %s", type(exc).__name__)
+        return "unavailable", "扫描服务不可用或超时"
+
+
+def _safe_archive_member(info: zipfile.ZipInfo) -> tuple[bool, str]:
+    name = info.filename.replace("\\", "/")
+    normalized = normpath(name)
+    parts = name.split("/")
+    if name.startswith("/") or (parts and ":" in parts[0]) or any(part == ".." for part in parts) or normalized == ".." or normalized.startswith("../"):
+        return False, "路径穿越风险"
+    mode = (info.external_attr >> 16) & 0xFFFF
+    if (mode & 0o170000) == 0o120000:
+        return False, "符号链接"
+    return True, ""
+
+
+def inspect_zip_archive(path: str, member_name: str = "") -> dict:
+    """List ZIP/APK contents without extracting files; optionally preview small text."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            total_uncompressed = sum(max(0, i.file_size) for i in infos)
+            items = []
+            for info in infos[:MAX_ARCHIVE_INSPECT_ENTRIES]:
+                safe, reason = _safe_archive_member(info)
+                suffix = Path(info.filename).suffix.lower()
+                items.append({
+                    "name": info.filename[:300],
+                    "size": max(0, info.file_size),
+                    "compressed_size": max(0, info.compress_size),
+                    "suspicious": suffix in SUSPICIOUS_SUFFIXES,
+                    "unsafe": not safe,
+                    "reason": reason,
+                    "previewable": safe and not info.is_dir() and suffix in TEXT_PREVIEW_SUFFIXES and 0 < info.file_size <= MAX_TEXT_PREVIEW_BYTES,
+                })
+            preview = None
+            preview_error = ""
+            if member_name:
+                found = next((i for i in infos if i.filename == member_name), None)
+                if found is None:
+                    preview_error = "未找到指定文件"
+                else:
+                    safe, reason = _safe_archive_member(found)
+                    suffix = Path(found.filename).suffix.lower()
+                    if not safe:
+                        preview_error = "该条目存在路径或链接风险，禁止预览"
+                    elif found.is_dir() or suffix not in TEXT_PREVIEW_SUFFIXES:
+                        preview_error = "仅允许预览常见文本文件；不会执行或渲染其内容"
+                    elif found.file_size > MAX_TEXT_PREVIEW_BYTES:
+                        preview_error = "文件超过 64 KiB 预览上限"
+                    else:
+                        raw = zf.read(found)
+                        preview = raw.decode("utf-8", "replace")
+            return {
+                "supported": True, "items": items, "entry_count": len(infos),
+                "truncated": len(infos) > MAX_ARCHIVE_INSPECT_ENTRIES,
+                "total_uncompressed": total_uncompressed, "preview": preview,
+                "preview_error": preview_error,
+            }
+    except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError):
+        return {"supported": False, "items": [], "entry_count": 0, "truncated": False,
+                "total_uncompressed": 0, "preview": None,
+                "preview_error": "无法安全读取该 ZIP/APK 文件；7Z/RAR 内容浏览尚未接入"}
+
+
+def _download_resource_to_temp(key: str) -> str:
+    fd, path = tempfile.mkstemp(prefix="admin-inspect-", suffix=Path(key).suffix.lower())
+    try:
+        with os.fdopen(fd, "wb") as target:
+            obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+            body = obj["Body"]
+            total = 0
+            try:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_UPLOAD_MB * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail="文件超过平台检查上限")
+                    target.write(chunk)
+            finally:
+                body.close()
+        return path
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
 
 
 def archive_is_valid(path: str, filename: str) -> bool:
@@ -570,6 +719,9 @@ async def submit_resource(
         archive_path, archive_size = await save_upload_to_temp(archive, max_bytes, file_label="Archive")
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
+        scan_status, scan_result = clamav_scan(archive_path)
+        if scan_status == "infected":
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="安全扫描检测到疑似恶意文件，已拒绝上传。")
 
         cover_filename = None
         cover_ext = None
@@ -606,8 +758,8 @@ async def submit_resource(
             if cover_path and cover_key and cover_mime:
                 s3_put(cover_path, cover_key, cover_mime)
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,cover_size_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)",
-                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, cover_size),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,cover_size_bytes,scan_status,scan_result) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, cover_size, scan_status, scan_result),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
@@ -744,9 +896,49 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
         raise HTTPException(status_code=400, detail="Invalid review action")
     status = "approved" if action == "approve" else "rejected"
     with db_connect() as conn:
+        resource = conn.execute("SELECT scan_status FROM resources WHERE id=%s AND status='pending' FOR UPDATE", (resource_id,)).fetchone()
+        if not resource:
+            return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
+        if action == "approve" and resource["scan_status"] != "clean":
+            return RedirectResponse("/admin?notice=scan_required", status_code=303)
         conn.execute("UPDATE resources SET status=%s,review_note=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, review_note.strip()[:500], admin["id"], resource_id))
         conn.commit()
     return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
+
+
+
+@app.get("/admin/resources/{resource_id}/contents", response_class=HTMLResponse)
+def admin_resource_contents(request: Request, resource_id: int, member: str = ""):
+    admin = require_admin(request)
+    with db_connect() as conn:
+        resource = conn.execute(
+            "SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.id=%s",
+            (resource_id,),
+        ).fetchone()
+    if not resource or resource["status"] != "pending":
+        raise HTTPException(status_code=404, detail="Pending resource not found")
+    key = resource["filename"]
+    if not key or not key.startswith("files/") or ".." in key:
+        raise HTTPException(status_code=404, detail="File not found")
+    temp_path = None
+    try:
+        temp_path = _download_resource_to_temp(key)
+        ext = Path(resource["original_filename"] or key).suffix.lower()
+        if ext in {".zip", ".apk"}:
+            inspection = inspect_zip_archive(temp_path, member)
+        else:
+            inspection = {
+                "supported": False, "items": [], "entry_count": 0,
+                "truncated": False, "total_uncompressed": 0, "preview": None,
+                "preview_error": "目前仅支持 ZIP/APK 内部目录和小型文本预览；7Z/RAR 仅能进行基本安全扫描，暂不展开浏览。",
+            }
+        return page(request, "admin_resource_contents.html", user=admin, r=resource, inspection=inspection)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 @app.post("/admin/users/{user_id}/role")

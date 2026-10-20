@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% block title %}压缩包内容检查 · 管理后台{% endblock %}{% block content %}
+<section class="panel">
+  <div class="tag">SECURITY REVIEW</div>
+  <h1>查看提交文件内容</h1>
+  <p><strong>{{ r.name }}</strong> · {{ r.original_filename }}</p>
+  <p class="muted">提交者：{{ r.owner_name }} · 扫描状态：{{ {"clean":"扫描通过","infected":"检测到威胁","unavailable":"扫描服务不可用","not_scanned":"尚未扫描"}.get(r.scan_status, r.scan_status) }}</p>
+  <p class="muted small">此页面只列出归档目录并预览受限的文本文件，不会解压到磁盘、执行脚本或渲染 HTML。文件内容仍可能含有恶意指令或欺诈链接，请勿直接运行或复制执行。</p>
+  <a class="button secondary" href="/admin">返回管理后台</a>
+</section>
+{% if inspection.supported %}
+<section class="panel">
+  <h2>内部文件列表</h2>
+  <p class="muted small">共 {{ inspection.entry_count }} 个条目；标记为“可疑类型”的文件扩展名需要重点审查。仅凭扩展名不能判定恶意。</p>
+  {% if inspection.truncated %}<div class="notice">为保护后台性能，列表最多显示前 2000 个条目。</div>{% endif %}
+  <div class="table-wrap"><table><thead><tr><th>内部路径</th><th>大小</th><th>风险提示</th><th>操作</th></tr></thead><tbody>
+  {% for item in inspection.items %}
+  <tr>
+    <td style="overflow-wrap:anywhere">{{ item.name }}</td>
+    <td>{{ "%.1f"|format(item.size/1024) }} KiB</td>
+    <td>{% if item.unsafe %}<span class="tag" style="color:#b91c1c">{{ item.reason }}</span>{% elif item.suspicious %}<span class="tag" style="color:#b45309">可疑文件类型</span>{% else %}<span class="muted small">未发现扩展名提示</span>{% endif %}</td>
+    <td>{% if item.previewable %}<a href="/admin/resources/{{ r.id }}/contents?member={{ item.name|urlencode }}">预览文本</a>{% else %}<span class="muted small">不提供文本预览</span>{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="4">归档中没有可列出的条目。</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="muted small">归档内文件解压后总大小：{{ "%.1f"|format(inspection.total_uncompressed/1048576) }} MiB。列表不会自动解压文件。</p>
+</section>
+{% else %}
+<section class="panel">
+  <h2>暂不支持内部浏览</h2>
+  <p>{{ inspection.preview_error }}</p>
+</section>
+{% endif %}
+{% if inspection.preview_error %}<div class="notice">{{ inspection.preview_error }}</div>{% endif %}
+{% if inspection.preview is not none %}
+<section class="panel"><h2>文本预览</h2><p class="muted small">最多 64 KiB；按纯文本显示，不执行、不渲染。</p><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:65vh;overflow:auto">{{ inspection.preview }}</pre></section>
+{% endif %}
+{% endblock %}

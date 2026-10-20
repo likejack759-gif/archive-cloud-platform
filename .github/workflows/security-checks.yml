@@ -2,7 +2,7 @@ name: Security checks
 
 on:
   pull_request:
-    branches: [main, ui/game-community-redesign, features/community-hub]
+    branches: [main, ui/game-community-redesign, features/community-hub, ui/original-deep-space]
   push:
     branches:
       - security/csrf-login-upload-guards
@@ -10,6 +10,7 @@ on:
       - features/community-hub
       - ui/original-deep-space
       - feature/platform-storage-quota
+      - feature/upload-security-review
 
 permissions:
   contents: read
@@ -56,6 +57,9 @@ jobs:
 
       - name: Run upload cleanup regression tests
         run: python -m pytest -q tests/test_upload_cleanup.py
+
+      - name: Run upload security review tests
+        run: python -m pytest -q tests/test_upload_security_review.py
 
       - name: Run platform storage quota tests
         run: python -m pytest -q tests/test_storage_quota.py
