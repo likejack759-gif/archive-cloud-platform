@@ -825,6 +825,10 @@ def download_resource(request: Request, resource_id: int):
         resource = conn.execute("SELECT * FROM resources WHERE id=%s", (resource_id,)).fetchone()
         if not resource or resource["status"] != "approved":
             raise HTTPException(status_code=404, detail="Resource not found")
+        # Fail closed: only resources with a confirmed clean scan may be downloaded.
+        # This also protects legacy resources that were approved before scanning existed.
+        if resource.get("scan_status") != "clean":
+            raise HTTPException(status_code=404, detail="Resource not found")
         conn.execute("UPDATE resources SET downloads=downloads+1 WHERE id=%s", (resource_id,))
         conn.commit()
     key = resource["filename"]
