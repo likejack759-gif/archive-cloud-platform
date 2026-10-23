@@ -607,6 +607,10 @@ def s3_delete(key: str):
     except Exception:
         logging.exception("Failed to delete object from storage: key=%s", key)
 
+def s3_delete_strict(key: str):
+    """Deletion used by explicit user/admin actions; propagate errors for retry."""
+    s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
+
 
 def s3_delete_strict(key: str):
     """Deletion used by explicit user/admin actions; propagate errors for retry."""
@@ -978,7 +982,10 @@ def download_resource(request: Request, resource_id: int):
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
+        "X-Content-SHA256": resource.get("sha256", ""),
     }
+    if resource.get("storage_encoding", "raw") == "zstd":
+        return StreamingResponse(decompressed_s3_chunks(body), media_type="application/octet-stream", headers=headers)
     return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type="application/octet-stream", headers=headers)
 
 
@@ -1091,6 +1098,73 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
         conn.execute("UPDATE users SET role=%s WHERE id=%s", (role, user_id))
         conn.commit()
     return RedirectResponse("/admin?notice=user_role_updated", status_code=303)
+
+
+@app.post("/resources/{resource_id}/delete")
+def delete_resource(request: Request, resource_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    user = require_user(request)
+    with db_connect() as conn:
+        resource = conn.execute("SELECT * FROM resources WHERE id=%s FOR UPDATE", (resource_id,)).fetchone()
+        if not resource:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        if user["role"] != "admin" and int(resource["user_id"]) != int(user["id"]):
+            raise HTTPException(status_code=403, detail="You may only delete your own resources")
+        conn.execute("UPDATE resources SET status='deleting', review_note='Deletion in progress' WHERE id=%s", (resource_id,))
+        conn.commit()
+    try:
+        for key in (resource.get("filename"), resource.get("cover_filename")):
+            if key:
+                s3_delete_strict(key)
+    except Exception:
+        logging.exception("Resource deletion incomplete; row retained for retry id=%s", resource_id)
+        audit_security_event(user["id"], "resource_delete_failed", str(resource_id), "Object storage deletion failed; row retained")
+        target = "/admin?notice=delete_failed" if user["role"] == "admin" else "/my-resources?notice=delete_failed"
+        return RedirectResponse(target, status_code=303)
+    with db_connect() as conn:
+        conn.execute("DELETE FROM resources WHERE id=%s", (resource_id,))
+        conn.commit()
+    audit_security_event(user["id"], "resource_deleted", str(resource_id), "Resource and linked objects deleted")
+    target = "/admin?notice=resource_deleted" if user["role"] == "admin" else "/my-resources?notice=resource_deleted"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/admin/ip-bans")
+def create_ip_ban(request: Request, ip_address: str = Form(...), reason: str = Form(""), duration: str = Form("24h"), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    admin = require_admin(request)
+    try:
+        normalized_ip = str(ipaddress.ip_address(ip_address.strip()))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Enter a valid IPv4 or IPv6 address")
+    if normalized_ip == get_client_ip(request):
+        raise HTTPException(status_code=400, detail="You cannot ban the IP currently used for this admin session")
+    if duration not in {"10m", "1h", "24h", "permanent"}:
+        raise HTTPException(status_code=400, detail="Invalid ban duration")
+    expires_sql = {"10m": "NOW() + INTERVAL '10 minutes'", "1h": "NOW() + INTERVAL '1 hour'", "24h": "NOW() + INTERVAL '24 hours'", "permanent": "NULL"}[duration]
+    with db_connect() as conn:
+        conn.execute("UPDATE ip_bans SET revoked_at=NOW(),revoked_by=%s WHERE ip_address=%s AND revoked_at IS NULL", (admin["id"], normalized_ip))
+        conn.execute(
+            f"INSERT INTO ip_bans (ip_address,reason,created_by,expires_at) VALUES (%s,%s,%s,{expires_sql})",
+            (normalized_ip, reason.strip()[:500], admin["id"]),
+        )
+        conn.commit()
+    audit_security_event(admin["id"], "ip_banned", normalized_ip, f"duration={duration}; reason={reason.strip()[:300]}")
+    return RedirectResponse("/admin?notice=ip_banned", status_code=303)
+
+
+@app.post("/admin/ip-bans/{ban_id}/revoke")
+def revoke_ip_ban(request: Request, ban_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    admin = require_admin(request)
+    with db_connect() as conn:
+        row = conn.execute("SELECT ip_address FROM ip_bans WHERE id=%s AND revoked_at IS NULL", (ban_id,)).fetchone()
+        if row:
+            conn.execute("UPDATE ip_bans SET revoked_at=NOW(),revoked_by=%s WHERE id=%s", (admin["id"], ban_id))
+            conn.commit()
+    if row:
+        audit_security_event(admin["id"], "ip_unbanned", row["ip_address"], "Manual unban")
+    return RedirectResponse("/admin?notice=ip_unbanned", status_code=303)
 
 
 @app.get("/health")
