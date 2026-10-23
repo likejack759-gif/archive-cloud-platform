@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>错误报告管理</h1>
+  <p>共显示最近 200 条报告。AI 处理结果会在对应 GitHub Issue 和 Pull Request 中跟踪。</p>
+  {% for report in reports %}
+  <article class="panel" style="margin:1rem 0">
+    <h2>#{{ report.id }} · {{ report.title }}</h2>
+    <p><strong>状态：</strong>{{ report.status }} · {{ report.created_at }}</p>
+    <p>{{ report.description }}</p>
+    {% if report.steps %}<h3>复现步骤</h3><pre>{{ report.steps }}</pre>{% endif %}
+    {% if report.error_log %}<h3>错误日志</h3><pre>{{ report.error_log }}</pre>{% endif %}
+    {% if report.github_issue_url %}<p><a href="{{ report.github_issue_url }}" rel="noopener noreferrer" target="_blank">查看 GitHub Issue / AI 修复进度</a></p>{% else %}<p>尚未同步到 GitHub。请检查服务器端 GITHUB_ISSUES_TOKEN 配置。</p>{% endif %}
+    <form method="post" action="/admin/feedback/{{ report.id }}/status">
+      <label>更新状态</label>
+      <select name="status">
+        {% for value in ['new','investigating','resolved','ignored'] %}
+        <option value="{{ value }}" {% if report.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">保存状态</button>
+    </form>
+  </article>
+  {% else %}<p>暂无错误报告。</p>{% endfor %}
+</section>
+{% endblock %}
