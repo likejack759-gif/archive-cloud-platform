@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import zipfile
 import logging
+from collections import deque
 import time
 import threading
 import socket
@@ -60,6 +61,37 @@ app = FastAPI(title="Archive Cloud Platform")
 if SECRET_KEY:
     app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=SESSION_HTTPS_ONLY)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+class RecentErrorLogHandler(logging.Handler):
+    """Bounded in-memory buffer containing ERROR and CRITICAL records only."""
+    def __init__(self, capacity: int = 300):
+        super().__init__(level=logging.ERROR)
+        self.records = deque(maxlen=capacity)
+        self.lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            rendered = self.format(record)
+            with self.lock:
+                self.records.append({
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
+                    "level": record.levelname,
+                    "logger": record.name[:120],
+                    "message": rendered[-4000:],
+                })
+        except Exception:
+            self.handleError(record)
+
+    def recent(self, limit: int = 200) -> list[dict]:
+        with self.lock:
+            return list(self.records)[-limit:][::-1]
+
+
+_error_log_handler = RecentErrorLogHandler()
+_error_log_handler.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger().addHandler(_error_log_handler)
+
 
 
 def db_connect():
@@ -1050,6 +1082,23 @@ def admin_page(request: Request, notice: str = ""):
         audit_events = conn.execute("SELECT a.*,u.username AS actor_name FROM security_audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
     return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, all_resources=all_resources, bans=bans, audit_events=audit_events, notice=notice)
+
+
+@app.get("/admin/logs", response_class=HTMLResponse)
+def admin_error_logs(request: Request, limit: int = 100):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    limit = max(20, min(int(limit), 200))
+    return page(
+        request,
+        "error_logs.html",
+        user=user,
+        error_logs=_error_log_handler.recent(limit),
+        limit=limit,
+    )
 
 
 @app.post("/admin/invites")
