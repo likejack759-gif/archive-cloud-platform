@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}提交问题反馈 · 云端资源库{% endblock %}
+{% block content %}
+<section class="panel">
+  <div class="tag">BUG REPORT</div>
+  <h1>提交问题反馈</h1>
+  <p class="muted">遇到页面报错、上传失败或其他异常时，请描述发生了什么。无需进入管理后台。若页面显示错误信息，可复制到下方日志框。</p>
+</section>
+{% if sent == "1" %}
+<section class="panel notice" role="status">
+  <h2 style="margin-top:0">反馈已提交</h2>
+  <p>感谢帮助测试！管理员可以在后台的「问题反馈」中查看并处理。</p>
+  <a class="button" href="/">返回首页</a>
+</section>
+{% else %}
+{% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+<section class="panel">
+  <form method="post" action="/feedback">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="title">问题标题（必填）</label>
+    <input id="title" name="title" maxlength="160" minlength="3" required value="{{ values.title if values else '' }}" placeholder="例如：上传 ZIP 后提示服务器错误">
+    <label for="description">问题描述（必填）</label>
+    <textarea id="description" name="description" maxlength="5000" minlength="5" rows="4" required placeholder="发生了什么？页面显示什么提示？">{{ values.description if values else '' }}</textarea>
+    <label for="steps">复现步骤（选填）</label>
+    <textarea id="steps" name="steps" maxlength="5000" rows="3" placeholder="1. 打开哪个页面；2. 点击什么；3. 出现什么结果。">{{ values.steps if values else '' }}</textarea>
+    <label for="error_log">错误信息或日志（选填，最多 20,000 字符）</label>
+    <textarea id="error_log" name="error_log" maxlength="20000" rows="6" placeholder="请粘贴错误提示或管理员提供的日志；提交前请删除密码、验证码、Cookie、令牌等敏感内容。">{{ values.error_log if values else '' }}</textarea>
+    <label for="reporter">称呼或测试编号（选填）</label>
+    <input id="reporter" name="reporter" maxlength="100" value="{{ values.reporter if values else '' }}" placeholder="可留空，不需要填写真实姓名">
+    <p class="muted small">本页面不会要求密码或邀请码。请勿粘贴账户凭据或个人敏感信息。</p>
+    <button type="submit">提交问题报告</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
