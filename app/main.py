@@ -10,6 +10,7 @@ import threading
 import socket
 import struct
 import ipaddress
+import shutil
 from pathlib import Path
 import zstandard as zstd
 from posixpath import normpath
@@ -1063,11 +1064,29 @@ def admin_resource_contents(request: Request, resource_id: int, member: str = ""
     if not key or not key.startswith("files/") or ".." in key:
         raise HTTPException(status_code=404, detail="File not found")
     temp_path = None
+    restored_path = None
     try:
         temp_path = _download_resource_to_temp(key)
+        inspect_path = temp_path
+        if resource.get("storage_encoding", "raw") == "zstd":
+            needed = int(resource.get("size_bytes") or 0) + 256 * 1024 * 1024
+            if shutil.disk_usage(tempfile.gettempdir()).free < needed:
+                inspection = {
+                    "supported": False, "items": [], "entry_count": 0,
+                    "truncated": False, "total_uncompressed": 0, "preview": None,
+                    "preview_error": "磁盘余量保护：可用空间不足，暂不生成内容预览。",
+                }
+                return page(request, "admin_resource_contents.html", user=admin, r=resource, inspection=inspection)
+            fd, restored_path = tempfile.mkstemp(prefix="admin-restored-", suffix=Path(resource["original_filename"] or key).suffix.lower())
+            os.close(fd)
+            with open(temp_path, "rb") as compressed, open(restored_path, "wb") as restored:
+                zstd.ZstdDecompressor().copy_stream(compressed, restored)
+            if os.path.getsize(restored_path) != int(resource.get("size_bytes") or 0):
+                raise HTTPException(status_code=422, detail="存储文件恢复后的大小与原文件记录不一致")
+            inspect_path = restored_path
         ext = Path(resource["original_filename"] or key).suffix.lower()
         if ext in {".zip", ".apk"}:
-            inspection = inspect_zip_archive(temp_path, member)
+            inspection = inspect_zip_archive(inspect_path, member)
         else:
             inspection = {
                 "supported": False, "items": [], "entry_count": 0,
@@ -1076,11 +1095,12 @@ def admin_resource_contents(request: Request, resource_id: int, member: str = ""
             }
         return page(request, "admin_resource_contents.html", user=admin, r=resource, inspection=inspection)
     finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+        for temporary_path in (temp_path, restored_path):
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
 
 
 @app.post("/admin/users/{user_id}/role")
