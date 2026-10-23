@@ -1053,20 +1053,33 @@ def admin_page(request: Request, notice: str = ""):
 
 
 @app.post("/admin/invites")
-def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1), csrf_token: str = Form(...)):
+def create_invite(
+    request: Request,
+    label: str = Form(""),
+    max_uses: int = Form(1),
+    batch_count: int = Form(1),
+    csrf_token: str = Form(...),
+):
     validate_csrf(request, csrf_token)
     admin = require_admin(request)
     max_uses = max(1, min(int(max_uses), 1000))
+    batch_count = max(1, min(int(batch_count), 100))
     label = label.strip()[:100]
-    code = secrets.token_urlsafe(12).replace("-", "A").replace("_", "B")[:16]
-    code_digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    created_codes = []
     with db_connect() as conn:
-        conn.execute(
-            "INSERT INTO invites (code,created_by,is_active,label,max_uses,uses) VALUES (%s,%s,TRUE,%s,%s,0)",
-            (code_digest, admin["id"], label, max_uses),
-        )
+        for index in range(batch_count):
+            code = secrets.token_urlsafe(12).replace("-", "A").replace("_", "B")[:16]
+            code_digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+            invite_label = f"{label} #{index + 1}" if label and batch_count > 1 else label
+            conn.execute(
+                "INSERT INTO invites (code,created_by,is_active,label,max_uses,uses) VALUES (%s,%s,TRUE,%s,%s,0)",
+                (code_digest, admin["id"], invite_label, max_uses),
+            )
+            created_codes.append({"label": invite_label or f"邀请码 {index + 1}", "code": code})
         conn.commit()
-    request.session["new_invite"] = code
+    # Plaintext codes are stored in the session only for this one-time display.
+    request.session.pop("new_invite", None)
+    request.session["new_invites"] = created_codes
     return RedirectResponse("/admin?notice=invite_created", status_code=303)
 
 
