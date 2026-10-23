@@ -7,7 +7,8 @@
   <p class="muted">补充清晰的名称、说明和封面，方便管理员审核与其他用户识别。审核通过后，资源才会出现在资源库中。</p>
   <div class="notice" style="background:#f2f7ff;border-color:#d8e7ff;color:#42648f">文件最大 {{ max_upload_mb }} MB；封面图片最大 8 MB。支持 ZIP、7Z、RAR 压缩包及 APK 文件。</div>
   {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
-  <form method="post" action="/submit" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div id="upload-size-warning" class="notice error" role="alert" aria-live="polite" hidden></div>
+  <form id="resource-upload-form" method="post" action="/submit" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>资源类型</label>
     <select name="resource_type" required><option value="archive">压缩包（ZIP / 7Z / RAR）</option><option value="apk">安卓应用（APK）</option></select>
     <label>资源名称</label>
@@ -15,10 +16,40 @@
     <label>资源说明（可选）</label>
     <textarea name="description" maxlength="2000" placeholder="填写应用功能、版本号或资源内容"></textarea>
     <label>资源文件（压缩包或 APK）</label>
-    <input type="file" name="archive" accept=".zip,.7z,.rar,.apk" required>
+    <input id="archive-file" type="file" name="archive" accept=".zip,.7z,.rar,.apk" required aria-describedby="upload-size-warning">
     <label>封面图片（JPG / PNG / WEBP / GIF）</label>
     <input type="file" name="cover" accept=".jpg,.jpeg,.png,.webp,.gif">
     <div class="row" style="margin-top:6px"><button type="submit">提交审核 →</button><a class="btn secondary" href="/my-resources">查看个人中心</a></div>
   </form>
 </div>
+<script>
+(() => {
+  const limitBytes = {{ max_upload_mb }} * 1024 * 1024;
+  const input = document.getElementById("archive-file");
+  const form = document.getElementById("resource-upload-form");
+  const warning = document.getElementById("upload-size-warning");
+  const submitButton = form.querySelector('button[type="submit"]');
+
+  function checkFileSize() {
+    const file = input.files && input.files[0];
+    const tooLarge = Boolean(file && file.size > limitBytes);
+    warning.hidden = !tooLarge;
+    warning.textContent = tooLarge
+      ? '所选文件为 ' + (file.size / 1024 / 1024).toFixed(1) + ' MB，超过上传上限 {{ max_upload_mb }} MB。请先压缩或选择较小的文件；当前页面不会跳转。'
+      : '';
+    input.setAttribute('aria-invalid', tooLarge ? 'true' : 'false');
+    submitButton.disabled = tooLarge;
+    return !tooLarge;
+  }
+
+  input.addEventListener("change", checkFileSize);
+  form.addEventListener("submit", (event) => {
+    if (!checkFileSize()) {
+      event.preventDefault();
+      warning.scrollIntoView({ behavior: "smooth", block: "center" });
+      input.focus();
+    }
+  });
+})();
+</script>
 {% endblock %}

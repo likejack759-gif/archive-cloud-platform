@@ -110,8 +110,20 @@ def test_request_guard_rejects_invalid_content_length():
     assert response.status_code == 400
 
 
-def test_request_guard_allows_small_request():
+def test_request_guard_allows_small_request(monkeypatch):
     request = make_request(path="/login", headers={"content-length": "128"})
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def execute(self, *_args):
+            return self
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
 
     async def call_next(_request):
         return Response("ok", status_code=200)
