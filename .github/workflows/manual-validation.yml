@@ -1,0 +1,49 @@
+name: Manual Change Validation
+
+on:
+  push:
+    branches: [feature/manual-feedback-only]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Compile application
+        run: python -m compileall -q app
+      - name: Parse Jinja templates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+          env = Environment(loader=FileSystemLoader("app/templates"))
+          templates = sorted(Path("app/templates").glob("*.html"))
+          for template in templates:
+              env.get_template(template.name)
+          print(f"Parsed {len(templates)} templates")
+          PY
+      - name: Run tests when present
+        env:
+          SECRET_KEY: ci-only-not-production
+          ADMIN_PASSWORD: ci-only-not-production
+          DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
+          ADMIN_USERNAME: ci-test-admin
+        run: |
+          if find . -maxdepth 2 -type f \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q .; then
+            pytest -q
+          else
+            echo "No automated tests found; syntax and template checks still run."
+          fi
