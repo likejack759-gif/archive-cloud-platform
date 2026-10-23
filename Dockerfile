@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 RUN mkdir -p /data/files /data/covers
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips=127.0.0.1"]
