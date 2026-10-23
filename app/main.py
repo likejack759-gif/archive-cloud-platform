@@ -608,6 +608,62 @@ def s3_delete(key: str):
         logging.exception("Failed to delete object from storage: key=%s", key)
 
 
+def s3_delete_strict(key: str):
+    """Deletion used by explicit user/admin actions; propagate errors for retry."""
+    s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
+
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def compress_if_smaller(path: str) -> tuple[str, str, int]:
+    """Losslessly wrap the file in Zstandard only if at least 1% smaller."""
+    compressed_path = None
+    try:
+        fd, compressed_path = tempfile.mkstemp(prefix="archive-store-", suffix=".zst")
+        os.close(fd)
+        with open(path, "rb") as source, open(compressed_path, "wb") as target:
+            zstd.ZstdCompressor(level=3, threads=0).copy_stream(source, target)
+        original_size = os.path.getsize(path)
+        compressed_size = os.path.getsize(compressed_path)
+        if compressed_size <= int(original_size * 0.99):
+            return compressed_path, "zstd", compressed_size
+        os.unlink(compressed_path)
+        return path, "raw", original_size
+    except Exception:
+        logging.exception("Secondary compression failed; preserving original upload")
+        if compressed_path:
+            try:
+                os.unlink(compressed_path)
+            except OSError:
+                pass
+        return path, "raw", os.path.getsize(path)
+
+
+def decompressed_s3_chunks(body, chunk_size: int = 1024 * 1024):
+    reader = zstd.ZstdDecompressor().stream_reader(body)
+    try:
+        while True:
+            chunk = reader.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        reader.close()
+        try:
+            body.close()
+        except Exception:
+            pass
+
+
 def stream_s3_object(key: str, filename: str, content_type: str):
     try:
         obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
@@ -793,6 +849,7 @@ async def submit_resource(
     try:
         # Stage and validate all files before reserving quota or uploading anything.
         archive_path, archive_size = await save_upload_to_temp(archive, max_bytes, file_label="Archive")
+        original_sha256 = sha256_file(archive_path)
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
         scan_status, scan_result = clamav_scan(archive_path)
@@ -815,10 +872,11 @@ async def submit_resource(
                 return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="封面文件内容不是有效的支持格式图片。")
             cover_mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}[cover_ext]
 
-        archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
+        stored_path, storage_encoding, stored_size = compress_if_smaller(archive_path)
+        archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}" + (".zst" if storage_encoding == "zstd" else "")
         cover_key = f"covers/{secrets.token_hex(16)}{cover_ext}" if cover_ext else None
-        content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
-        incoming_bytes = archive_size + cover_size
+        content_type = "application/octet-stream"
+        incoming_bytes = stored_size + cover_size
 
         # Serialize quota check + object writes + DB insert across app workers.
         # The transaction-level advisory lock remains held until commit/rollback.
@@ -830,12 +888,12 @@ async def submit_resource(
                     status_code=413,
                     detail="平台存储空间已满（总容量上限为 5 GiB），请联系管理员清理资源后再上传。",
                 )
-            s3_put(archive_path, archive_key, content_type)
+            s3_put(stored_path, archive_key, content_type)
             if cover_path and cover_key and cover_mime:
                 s3_put(cover_path, cover_key, cover_mime)
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,cover_size_bytes,scan_status,scan_result) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
-                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, cover_size, scan_status, scan_result),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,cover_size_bytes,storage_size_bytes,storage_encoding,sha256,scan_status,scan_result) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s,%s,%s,%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, cover_size, stored_size, storage_encoding, original_sha256, scan_status, scan_result),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
@@ -859,7 +917,7 @@ async def submit_resource(
             s3_delete(cover_key)
         return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="提交失败，请稍后重试。")
     finally:
-        for p in (archive_path, cover_path):
+        for p in (archive_path, cover_path, locals().get("stored_path")):
             if p:
                 try:
                     os.unlink(p)
