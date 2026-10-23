@@ -158,7 +158,7 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ip_bans (
                 id BIGSERIAL PRIMARY KEY,
-                ip_address TEXT NOT NULL UNIQUE,
+                ip_address TEXT NOT NULL,
                 reason TEXT NOT NULL DEFAULT '',
                 created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -330,7 +330,7 @@ async def request_size_guard(request: Request, call_next):
             with db_connect() as conn:
                 ban = conn.execute(
                     "SELECT reason FROM ip_bans WHERE ip_address=%s AND revoked_at IS NULL "
-                    "AND (expires_at IS NULL OR expires_at > NOW())",
+                    "AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at DESC LIMIT 1",
                     (client_ip,),
                 ).fetchone()
             if ban:
@@ -997,7 +997,7 @@ def admin_page(request: Request, notice: str = ""):
         invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
         users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
         all_resources = conn.execute("SELECT r.id,r.name,r.original_filename,r.status,r.size_bytes,r.created_at,u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 100").fetchall()
-        bans = conn.execute("SELECT b.*,u.username AS creator_name FROM ip_bans b LEFT JOIN users u ON u.id=b.created_by WHERE b.revoked_at IS NULL ORDER BY b.created_at DESC LIMIT 200").fetchall()
+        bans = conn.execute("SELECT b.*,u.username AS creator_name FROM ip_bans b LEFT JOIN users u ON u.id=b.created_by WHERE b.revoked_at IS NULL AND (b.expires_at IS NULL OR b.expires_at > NOW()) ORDER BY b.created_at DESC LIMIT 200").fetchall()
     stats = dict(stats_row)
     return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, all_resources=all_resources, bans=bans, notice=notice)
 
