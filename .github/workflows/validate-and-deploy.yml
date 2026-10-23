@@ -1,0 +1,122 @@
+name: Validate and Deploy Production
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-file-center-production
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Compile Python
+        run: python -m compileall -q app tests scripts
+      - name: Parse templates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from jinja2 import Environment, FileSystemLoader
+          env = Environment(loader=FileSystemLoader('app/templates'))
+          files = sorted(Path('app/templates').glob('*.html'))
+          for path in files: env.get_template(path.name)
+          print('Parsed', len(files), 'templates')
+          PY
+      - name: Run tests
+        env:
+          SECRET_KEY: ci-only-not-production
+          ADMIN_PASSWORD: ci-only-not-production
+          DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
+          ADMIN_USERNAME: ci-test-admin
+        run: pytest -q
+      - name: Check Compose syntax
+        env:
+          SECRET_KEY: ci-compose-key
+          ADMIN_PASSWORD: ci-compose-password
+        run: docker compose config -q
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    steps:
+      - name: Configure SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PRODUCTION_SSH_KEY }}
+      - name: Add pre-verified VPS host key
+        env:
+          PRODUCTION_KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$PRODUCTION_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Back up and deploy app only
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+        run: |
+          set -Eeuo pipefail
+          ssh "$PRODUCTION_USER@$PRODUCTION_HOST" 'bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          ROOT=/opt/archive-cloud-platform
+          cd "$ROOT"
+          test -f .env
+          test -f docker-compose.yml
+          docker compose config -q
+          mkdir -p /var/backups/cloud-file-center
+          TS=$(date -u +%Y%m%dT%H%M%SZ)
+          BACKUP=/var/backups/cloud-file-center/$TS
+          mkdir -p "$BACKUP"
+          tar -czf "$BACKUP/source.tgz" app Dockerfile requirements.txt
+          DB_CID=$(docker compose ps -q db)
+          test -n "$DB_CID"
+          docker exec "$DB_CID" sh -lc 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$BACKUP/database.sql"
+          test -s "$BACKUP/database.sql"
+          TMP=$(mktemp -d)
+          RESTORE="$ROOT/.ai-deploy-rollback-$TS"
+          cleanup() { rm -rf "$TMP"; }
+          trap cleanup EXIT
+          git fetch origin main
+          git archive FETCH_HEAD | tar -x -C "$TMP"
+          test -f "$TMP/app/main.py"
+          mv "$ROOT/app" "$RESTORE-app"
+          cp -a "$TMP/app" "$ROOT/app"
+          cp "$ROOT/Dockerfile" "$BACKUP/Dockerfile"
+          cp "$ROOT/requirements.txt" "$BACKUP/requirements.txt"
+          cp "$TMP/Dockerfile" "$ROOT/Dockerfile"
+          cp "$TMP/requirements.txt" "$ROOT/requirements.txt"
+          if docker compose build resource-platform && docker compose up -d --no-deps resource-platform; then
+            sleep 5
+            if curl --fail --silent --show-error http://127.0.0.1:8000/health >/dev/null; then
+              rm -rf "$RESTORE-app"
+              echo "Deploy successful. Backup: $BACKUP"
+              exit 0
+            fi
+          fi
+          echo 'Health/build failed; rolling back app source and image.' >&2
+          rm -rf "$ROOT/app"
+          mv "$RESTORE-app" "$ROOT/app"
+          cp "$BACKUP/Dockerfile" "$ROOT/Dockerfile"
+          cp "$BACKUP/requirements.txt" "$ROOT/requirements.txt"
+          docker compose build resource-platform || true
+          docker compose up -d --no-deps resource-platform || true
+          curl --fail --silent http://127.0.0.1:8000/health >/dev/null || true
+          exit 1
+          REMOTE
