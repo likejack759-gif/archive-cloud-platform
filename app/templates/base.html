@@ -61,9 +61,10 @@ code{background:#eef4ff;color:#315c9f;padding:3px 6px;border-radius:6px}
 </head><body><div class="wrap">
 <header><a class="brand" href="/"><span class="logo">✦</span><span>云端资源库<small style="display:block;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:1.2px">CLOUD FILE CENTER</small></span></a>
 <nav>
+<a href="/feedback">错误报告</a>
 {% if user %}
 <a href="/">资源首页</a><a href="/submit">提交资源</a><a href="/my-resources">个人中心</a>
-{% if user.role == 'admin' %}<a href="/admin">管理后台</a>{% endif %}
+{% if user.role == 'admin' %}<a href="/admin">管理后台</a><a href="/admin/feedback">错误报告管理</a>{% endif %}
 <form class="inline" method="post" action="/logout"><button class="secondary" type="submit">退出登录</button></form>
 {% else %}<a href="/login">登录</a><a href="/register">邀请码注册</a>{% endif %}
 </nav></header>
