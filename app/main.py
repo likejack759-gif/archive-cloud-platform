@@ -216,6 +216,20 @@ def init_db():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id BIGSERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                steps TEXT NOT NULL DEFAULT '',
+                error_log TEXT NOT NULL DEFAULT '',
+                reporter TEXT NOT NULL DEFAULT '',
+                page_url TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         
         if ADMIN_USERNAME and ADMIN_PASSWORD:
             row = conn.execute(
@@ -1082,6 +1096,88 @@ def admin_page(request: Request, notice: str = ""):
         audit_events = conn.execute("SELECT a.*,u.username AS actor_name FROM security_audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
     return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, all_resources=all_resources, bans=bans, audit_events=audit_events, notice=notice)
+
+
+@app.get("/feedback", response_class=HTMLResponse)
+def bug_feedback_page(request: Request, sent: str = ""):
+    return page(request, "feedback.html", sent=sent)
+
+
+@app.post("/feedback")
+def submit_bug_feedback(
+    request: Request,
+    title: str = Form(...),
+    description: str = Form(...),
+    steps: str = Form(""),
+    error_log: str = Form(""),
+    reporter: str = Form(""),
+    csrf_token: str = Form(...),
+):
+    validate_csrf(request, csrf_token)
+    title = title.strip()[:160]
+    description = description.strip()[:5000]
+    steps = steps.strip()[:5000]
+    error_log = error_log.strip()[:20000]
+    reporter = reporter.strip()[:100]
+    if len(title) < 3 or len(description) < 5:
+        return page(
+            request, "feedback.html",
+            sent="",
+            error="请填写至少 3 个字符的标题和至少 5 个字符的问题描述。",
+            values={"title": title, "description": description, "steps": steps, "error_log": error_log, "reporter": reporter},
+        )
+    page_url = str(request.headers.get("referer", ""))[:500]
+    user_agent = str(request.headers.get("user-agent", ""))[:500]
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                """INSERT INTO bug_reports (title,description,steps,error_log,reporter,page_url,user_agent)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (title, description, steps, error_log, reporter, page_url, user_agent),
+            )
+            conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to save public bug report")
+        return page(
+            request, "feedback.html",
+            sent="",
+            error="报告暂时提交失败，请稍后重试。",
+            values={"title": title, "description": description, "steps": steps, "error_log": error_log, "reporter": reporter},
+        )
+    return RedirectResponse("/feedback?sent=1", status_code=303)
+
+
+@app.get("/admin/feedback", response_class=HTMLResponse)
+def admin_bug_feedback(request: Request, status: str = "new"):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    status = status if status in {"new", "reviewed", "fixed", "all"} else "new"
+    with db_connect() as conn:
+        if status == "all":
+            reports = conn.execute("SELECT * FROM bug_reports ORDER BY created_at DESC LIMIT 200").fetchall()
+        else:
+            reports = conn.execute("SELECT * FROM bug_reports WHERE status=%s ORDER BY created_at DESC LIMIT 200", (status,)).fetchall()
+    return page(request, "bug_reports.html", user=user, reports=reports, status=status)
+
+
+@app.post("/admin/feedback/{report_id}/status")
+def update_bug_feedback_status(
+    request: Request,
+    report_id: int,
+    status: str = Form(...),
+    csrf_token: str = Form(...),
+):
+    validate_csrf(request, csrf_token)
+    require_admin(request)
+    if status not in {"new", "reviewed", "fixed"}:
+        raise HTTPException(status_code=400, detail="Invalid report status")
+    with db_connect() as conn:
+        conn.execute("UPDATE bug_reports SET status=%s WHERE id=%s", (status, report_id))
+        conn.commit()
+    return RedirectResponse("/admin/feedback", status_code=303)
 
 
 @app.get("/admin/logs", response_class=HTMLResponse)
