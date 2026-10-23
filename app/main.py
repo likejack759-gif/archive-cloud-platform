@@ -68,12 +68,12 @@ class RecentErrorLogHandler(logging.Handler):
     def __init__(self, capacity: int = 300):
         super().__init__(level=logging.ERROR)
         self.records = deque(maxlen=capacity)
-        self.lock = threading.Lock()
+        self.buffer_lock = threading.Lock()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             rendered = self.format(record)
-            with self.lock:
+            with self.buffer_lock:
                 self.records.append({
                     "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created)),
                     "level": record.levelname,
@@ -84,7 +84,7 @@ class RecentErrorLogHandler(logging.Handler):
             self.handleError(record)
 
     def recent(self, limit: int = 200) -> list[dict]:
-        with self.lock:
+        with self.buffer_lock:
             return list(self.records)[-limit:][::-1]
 
 
