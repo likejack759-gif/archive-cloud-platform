@@ -612,11 +612,6 @@ def s3_delete_strict(key: str):
     s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
 
 
-def s3_delete_strict(key: str):
-    """Deletion used by explicit user/admin actions; propagate errors for retry."""
-    s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
-
-
 def sha256_file(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as source:
@@ -1001,8 +996,10 @@ def admin_page(request: Request, notice: str = ""):
         pending = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
         invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
         users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
+        all_resources = conn.execute("SELECT r.id,r.name,r.original_filename,r.status,r.size_bytes,r.created_at,u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 100").fetchall()
+        bans = conn.execute("SELECT b.*,u.username AS creator_name FROM ip_bans b LEFT JOIN users u ON u.id=b.created_by WHERE b.revoked_at IS NULL ORDER BY b.created_at DESC LIMIT 200").fetchall()
     stats = dict(stats_row)
-    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, notice=notice)
+    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, all_resources=all_resources, bans=bans, notice=notice)
 
 
 @app.post("/admin/invites")
