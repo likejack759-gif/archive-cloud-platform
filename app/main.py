@@ -43,6 +43,12 @@ LOGIN_LOCKOUT_SECONDS = 15 * 60
 LOGIN_MAX_TRACKED_KEYS = 10_000
 LOGIN_CLEANUP_INTERVAL_SECONDS = 60
 LOGIN_CAPACITY_RETRY_SECONDS = 60
+REQUEST_RATE_LIMIT = max(30, int(os.getenv("REQUEST_RATE_LIMIT", "120")))
+REQUEST_RATE_WINDOW_SECONDS = max(10, int(os.getenv("REQUEST_RATE_WINDOW_SECONDS", "60")))
+REQUEST_RATE_MAX_TRACKED_IPS = 10_000
+_request_windows: dict[str, tuple[int, float]] = {}
+_request_windows_lock = threading.Lock()
+_last_request_cleanup = 0.0
 _login_attempts: dict[str, tuple[int, float, float]] = {}
 _login_attempts_lock = threading.Lock()
 _last_login_cleanup = 0.0
@@ -326,8 +332,15 @@ async def request_size_guard(request: Request, call_next):
         if content_length < 0 or content_length > limit:
             return PlainTextResponse("Request body too large", status_code=413)
     if request.url.path != "/health":
+        client_ip = get_client_ip(request)
+        limited, retry_after = request_rate_limited(client_ip)
+        if limited:
+            return PlainTextResponse(
+                "Too many requests; please slow down",
+                status_code=429,
+                headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
+            )
         try:
-            client_ip = get_client_ip(request)
             with db_connect() as conn:
                 ban = conn.execute(
                     "SELECT reason FROM ip_bans WHERE ip_address=%s AND revoked_at IS NULL "
@@ -360,6 +373,32 @@ def get_client_ip(request: Request) -> str:
         return str(ipaddress.ip_address(peer))
     except ValueError:
         return "unknown"
+
+
+def request_rate_limited(client_ip: str) -> tuple[bool, int]:
+    """Bound per-IP request volume while keeping memory use capped."""
+    global _last_request_cleanup
+    now = time.monotonic()
+    with _request_windows_lock:
+        if now - _last_request_cleanup >= 60:
+            for key, (_, started) in list(_request_windows.items()):
+                if now - started >= REQUEST_RATE_WINDOW_SECONDS:
+                    _request_windows.pop(key, None)
+            _last_request_cleanup = now
+        entry = _request_windows.get(client_ip)
+        if entry is None:
+            if len(_request_windows) >= REQUEST_RATE_MAX_TRACKED_IPS:
+                return True, REQUEST_RATE_WINDOW_SECONDS
+            _request_windows[client_ip] = (1, now)
+            return False, 0
+        count, started = entry
+        if now - started >= REQUEST_RATE_WINDOW_SECONDS:
+            _request_windows[client_ip] = (1, now)
+            return False, 0
+        if count >= REQUEST_RATE_LIMIT:
+            return True, max(1, int(REQUEST_RATE_WINDOW_SECONDS - (now - started)))
+        _request_windows[client_ip] = (count + 1, started)
+        return False, 0
 
 
 def audit_security_event(actor_user_id: int | None, action: str, target: str = "", details: str = "") -> None:
