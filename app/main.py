@@ -209,9 +209,9 @@ def validate_csrf(request: Request, submitted_token: str) -> None:
         raise HTTPException(status_code=403, detail="Security token invalid or expired. Refresh the page and try again.")
 
 
-def login_rate_key(request: Request, username: str) -> str:
-    client_host = request.client.host if request.client else "unknown"
-    return f"{client_host}:{username.strip().casefold()[:128]}"
+def login_rate_key(request: Request) -> str:
+    """Throttle by client IP only, so changing usernames cannot bypass the limit."""
+    return request.client.host if request.client else "unknown"
 
 
 def _cleanup_login_attempts(now: float, *, force: bool = False) -> None:
@@ -462,7 +462,7 @@ def login_page(request: Request):
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...), csrf_token: str = Form(...)):
     validate_csrf(request, csrf_token)
-    key = login_rate_key(request, username)
+    key = login_rate_key(request)
     blocked, retry_after = login_is_blocked(key)
     if blocked:
         return page(request, "login.html", error=f"登录尝试过多，请在 {retry_after} 秒后重试。")
@@ -471,7 +471,7 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     if not user or not verify_password(password, user["password_hash"]):
         retry_after = record_login_failure(key)
         if retry_after:
-            return page(request, "login.html", error=f"登录失败次数过多，账号和当前网络组合已暂时限制登录，请在 {retry_after} 秒后重试。")
+            return page(request, "login.html", error=f"登录失败次数过多，当前 IP 已暂时限制登录，请在 {retry_after} 秒后重试。")
         return page(request, "login.html", error="用户名或密码不正确。")
     clear_login_failures(key)
     request.session.clear()
