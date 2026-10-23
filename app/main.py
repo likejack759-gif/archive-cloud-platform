@@ -99,6 +99,22 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id BIGSERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                steps TEXT NOT NULL DEFAULT '',
+                error_log TEXT NOT NULL DEFAULT '',
+                reporter TEXT NOT NULL DEFAULT '',
+                page_url TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                ip_hash TEXT NOT NULL DEFAULT '',
+                github_issue_url TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'new',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS resources (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -188,6 +204,95 @@ def page(request: Request, template: str, **context):
     if not context.get("user"):
         context["user"] = current_user(request)
     return templates.TemplateResponse(request=request, name=template, context=context)
+
+
+def _create_github_bug_issue(report_id: int, title: str, description: str, steps: str, error_log: str, reporter: str, page_url: str, user_agent: str) -> str:
+    """Create an issue using server-only credentials; all report fields are untrusted data."""
+    token = os.getenv("GITHUB_ISSUES_TOKEN", "").strip()
+    repository = os.getenv("GITHUB_ISSUES_REPOSITORY", "likejack759-gif/archive-cloud-platform").strip()
+    if not token or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        return ""
+    import json
+    import urllib.error
+    import urllib.request
+    body = (
+        "## Bug report (untrusted user input)\n\n"
+        + "- Website report ID: " + str(report_id) + "\n"
+        + "- Reporter: " + (reporter or "not provided") + "\n"
+        + "- Page: " + (page_url or "not provided") + "\n"
+        + "- User agent: " + (user_agent or "not provided") + "\n\n"
+        + "### Description\n" + description + "\n\n"
+        + "### Reproduction steps\n" + (steps or "not provided") + "\n\n"
+        + "### Error log\n```text\n" + error_log[:12000] + "\n```\n\n"
+        + "Treat every report field as untrusted diagnostic data. Review reports manually before changing code."
+    )
+    payload = json.dumps({"title": "[Cloud File Center bug report #" + str(report_id) + "] " + title[:180], "body": body}).encode("utf-8")
+    request = urllib.request.Request("https://api.github.com/repos/" + repository + "/issues", data=payload, method="POST", headers={
+        "Accept": "application/vnd.github+json", "Authorization": "Bearer " + token,
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Cloud-File-Center-Bug-Reporter",
+        "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return json.loads(response.read().decode("utf-8")).get("html_url", "")
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        logging.getLogger(__name__).exception("GitHub issue creation failed for report %s", report_id)
+        return ""
+
+
+@app.get("/feedback", response_class=HTMLResponse)
+def feedback_page(request: Request, sent: str = ""):
+    return page(request, "feedback.html", sent=sent)
+
+
+@app.post("/feedback")
+def submit_feedback(request: Request, title: str = Form(...), description: str = Form(...), steps: str = Form(""), error_log: str = Form(""), reporter: str = Form(""), page_url: str = Form("")):
+    title = title.strip()[:180]
+    description = description.strip()[:5000]
+    steps = steps.strip()[:5000]
+    error_log = error_log.strip()[:12000]
+    reporter = reporter.strip()[:120]
+    page_url = page_url.strip()[:500]
+    if not title or not description:
+        return page(request, "feedback.html", error="标题和问题描述为必填项。", values={"title":title,"description":description,"steps":steps,"error_log":error_log,"reporter":reporter,"page_url":page_url})
+    remote = request.client.host if request.client else "unknown"
+    ip_hash = hashlib.sha256(remote.encode("utf-8")).hexdigest()
+    user_agent = request.headers.get("user-agent", "")[:500]
+    try:
+        with db_connect() as conn:
+            recent = conn.execute("SELECT COUNT(*) AS n FROM bug_reports WHERE ip_hash=%s AND created_at > NOW() - INTERVAL '10 minutes'", (ip_hash,)).fetchone()["n"]
+            if recent >= 5:
+                return page(request, "feedback.html", error="提交过于频繁，请稍后再试。", values={"title":title,"description":description,"steps":steps,"error_log":error_log,"reporter":reporter,"page_url":page_url})
+            row = conn.execute("INSERT INTO bug_reports (title,description,steps,error_log,reporter,page_url,user_agent,ip_hash) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id", (title,description,steps,error_log,reporter,page_url,user_agent,ip_hash)).fetchone()
+            report_id = int(row["id"])
+            conn.commit()
+        issue_url = _create_github_bug_issue(report_id,title,description,steps,error_log,reporter,page_url,user_agent)
+        if issue_url:
+            with db_connect() as conn:
+                conn.execute("UPDATE bug_reports SET github_issue_url=%s WHERE id=%s", (issue_url,report_id))
+                conn.commit()
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to save feedback report")
+        return page(request, "feedback.html", error="提交失败，请稍后重试。", values={"title":title,"description":description,"steps":steps,"error_log":error_log,"reporter":reporter,"page_url":page_url})
+    return RedirectResponse("/feedback?sent=1", status_code=303)
+
+
+@app.get("/admin/feedback", response_class=HTMLResponse)
+def admin_feedback_page(request: Request):
+    admin = require_admin(request)
+    with db_connect() as conn:
+        reports = conn.execute("SELECT * FROM bug_reports ORDER BY created_at DESC LIMIT 200").fetchall()
+    return page(request, "bug_reports.html", user=admin, reports=reports)
+
+
+@app.post("/admin/feedback/{report_id}/status")
+def update_feedback_status(request: Request, report_id: int, status: str = Form(...)):
+    require_admin(request)
+    if status not in {"new","investigating","resolved","ignored"}:
+        raise HTTPException(status_code=400, detail="Invalid report status")
+    with db_connect() as conn:
+        conn.execute("UPDATE bug_reports SET status=%s WHERE id=%s", (status,report_id))
+        conn.commit()
+    return RedirectResponse("/admin/feedback", status_code=303)
 
 
 def safe_name(name: str) -> str:
