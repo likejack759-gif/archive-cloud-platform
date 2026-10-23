@@ -145,3 +145,30 @@ def test_login_throttle_fails_closed_when_key_capacity_is_full(monkeypatch):
     assert len(main._login_attempts) == 2
     assert "new-key" not in main._login_attempts
 
+
+
+
+def test_login_rate_key_is_shared_across_usernames_from_same_ip():
+    request = make_request()
+    first_username_key = main.login_rate_key(request)
+    second_username_key = main.login_rate_key(request)
+
+    assert first_username_key == second_username_key == "127.0.0.1"
+
+
+def test_login_failures_accumulate_across_username_changes_from_same_ip():
+    request = make_request()
+    ip_key = main.login_rate_key(request)
+    main.clear_login_failures(ip_key)
+
+    # Simulate four failures against one username, then a fifth against another.
+    for _ in range(main.LOGIN_FAILURE_LIMIT - 1):
+        assert main.record_login_failure(ip_key) == 0
+
+    changed_username_key = main.login_rate_key(request)
+    assert changed_username_key == ip_key
+    retry_after = main.record_login_failure(changed_username_key)
+
+    assert retry_after > 0
+    assert main.login_is_blocked(ip_key)[0] is True
+    main.clear_login_failures(ip_key)
