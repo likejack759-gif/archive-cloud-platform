@@ -80,6 +80,25 @@ button,.btn,nav>a{min-height:42px}button:active,.btn:active{transform:translateY
 @media(max-width:640px){.wrap{padding:12px}header{align-items:flex-start;margin-bottom:18px;gap:12px}.brand{font-size:18px;gap:9px}.logo{width:40px;height:40px;border-radius:13px}nav{gap:3px}nav>a{padding:7px 8px;font-size:13px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.resource-body{padding:11px}.resource h3{font-size:15px}.panel{padding:15px;border-radius:17px}h2{font-size:19px}.cover{aspect-ratio:3/2}.hero{padding:25px 20px;border-radius:22px}.hero:before{width:230px;height:230px;right:-115px;top:-100px}.hero-actions .btn{flex:1}.hero-meta{margin-top:22px}.feature-strip{gap:9px}.feature-card{padding:13px}.feature-card h3{font-size:14px}.feature-card p{font-size:12px}.section-heading{margin-top:22px}}
 @media(max-width:380px){.grid{grid-template-columns:1fr}.cover{aspect-ratio:16/9}.feature-strip{grid-template-columns:1fr}.hero h1{font-size:30px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+
+/* Accessibility and mobile navigation polish */
+:focus-visible{outline:3px solid rgba(52,120,246,.58);outline-offset:3px}
+button:disabled,.btn[aria-disabled="true"]{opacity:.6;cursor:not-allowed;transform:none}
+img{max-width:100%}
+.resource-body{min-width:0}
+.resource p,.resource h3{overflow-wrap:anywhere}
+@media(max-width:640px){
+  header{gap:12px}
+  nav{width:100%;padding-top:4px}
+  nav>a{flex:0 0 auto}
+  nav form.inline{margin-left:auto}
+  .panel{overflow-wrap:anywhere}
+  .table-wrap{max-width:100%;-webkit-overflow-scrolling:touch}
+  input,textarea,select,button,.btn{min-height:42px}
+  .row>.btn,.row>button{max-width:100%}
+}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+
 </style>
 </head>
 <body><div class="wrap">
