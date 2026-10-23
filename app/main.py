@@ -9,7 +9,9 @@ import time
 import threading
 import socket
 import struct
+import ipaddress
 from pathlib import Path
+import zstandard as zstd
 from posixpath import normpath
 from urllib.parse import quote
 
@@ -126,6 +128,9 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending',
                 downloads BIGINT NOT NULL DEFAULT 0,
                 size_bytes BIGINT NOT NULL DEFAULT 0,
+                storage_size_bytes BIGINT NOT NULL DEFAULT 0,
+                storage_encoding TEXT NOT NULL DEFAULT 'raw',
+                sha256 TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 reviewed_at TIMESTAMPTZ,
                 reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
@@ -138,6 +143,9 @@ def init_db():
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS downloads BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS cover_size_bytes BIGINT NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS storage_size_bytes BIGINT NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS storage_encoding TEXT NOT NULL DEFAULT 'raw'")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS sha256 TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_status TEXT NOT NULL DEFAULT 'not_scanned'")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_result TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
@@ -147,6 +155,28 @@ def init_db():
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS max_uses INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS uses INTEGER NOT NULL DEFAULT 0")
         conn.execute("UPDATE invites SET uses=1 WHERE used_by IS NOT NULL AND uses=0")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ip_bans (
+                id BIGSERIAL PRIMARY KEY,
+                ip_address TEXT NOT NULL UNIQUE,
+                reason TEXT NOT NULL DEFAULT '',
+                created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at TIMESTAMPTZ,
+                revoked_at TIMESTAMPTZ,
+                revoked_by BIGINT REFERENCES users(id) ON DELETE SET NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS security_audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                actor_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
         
         if ADMIN_USERNAME and ADMIN_PASSWORD:
             row = conn.execute(
