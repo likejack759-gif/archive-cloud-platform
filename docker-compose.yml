@@ -4,7 +4,7 @@ services:
     container_name: cloud-resource-platform
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
@@ -12,5 +12,6 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
       SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
       DATA_DIR: /data
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-127.0.0.1,::1}
     volumes:
       - ./data:/data
