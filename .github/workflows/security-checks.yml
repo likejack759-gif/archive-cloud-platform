@@ -1,0 +1,113 @@
+name: Security checks
+
+on:
+  pull_request:
+    branches:
+      - main
+      - security/csrf-login-upload-guards
+  push:
+    branches:
+      - security/csrf-login-upload-guards
+
+permissions:
+  contents: read
+
+jobs:
+  static-security-checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: archive_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d archive_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: Check Python syntax
+        run: python -m compileall -q app tests
+
+      - name: Run security guard unit tests
+        run: python -m pytest -q tests/test_security_guards.py
+
+      - name: Run upload cleanup regression tests
+        run: python -m pytest -q tests/test_upload_cleanup.py
+
+      - name: Run PostgreSQL invitation concurrency tests
+        env:
+          TEST_DATABASE_URL: postgresql://test:test@127.0.0.1:5432/archive_test
+        run: python -m pytest -q tests/test_invite_concurrency.py
+
+      - name: Check POST routes and form CSRF tokens
+        run: |
+          python - <<'PY'
+          import ast
+          import re
+          from pathlib import Path
+
+          source = Path("app/main.py").read_text(encoding="utf-8")
+          tree = ast.parse(source, filename="app/main.py")
+          post_routes = []
+
+          for node in ast.walk(tree):
+              if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                  continue
+              is_post = any(
+                  isinstance(dec, ast.Call)
+                  and isinstance(dec.func, ast.Attribute)
+                  and isinstance(dec.func.value, ast.Name)
+                  and dec.func.value.id == "app"
+                  and dec.func.attr == "post"
+                  for dec in node.decorator_list
+              )
+              if is_post:
+                  args = {arg.arg for arg in node.args.args}
+                  body_calls = {
+                      call.func.id
+                      for call in ast.walk(node)
+                      if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                  }
+                  assert "csrf_token" in args, f"{node.name} is missing csrf_token parameter"
+                  assert "validate_csrf" in body_calls, f"{node.name} is missing validate_csrf()"
+                  post_routes.append(node.name)
+
+          assert len(post_routes) == 8, f"Expected 8 POST routes, found {len(post_routes)}"
+          assert len(post_routes) == len(set(post_routes)), "Duplicate POST route function names"
+
+          template_paths = [
+              "app/templates/base.html",
+              "app/templates/admin.html",
+              "app/templates/login.html",
+              "app/templates/register.html",
+              "app/templates/submit.html",
+          ]
+          for name in template_paths:
+              html = Path(name).read_text(encoding="utf-8")
+              forms = len(re.findall(r"<form\b", html, re.I))
+              closes = len(re.findall(r"</form\s*>", html, re.I))
+              tokens = len(re.findall(r"""name=["']csrf_token["']""", html))
+              assert forms == closes, f"{name}: form tags mismatch ({forms} opens, {closes} closes)"
+              assert forms == tokens, f"{name}: expected one CSRF token per form, found {tokens} for {forms} forms"
+              assert not re.search(r"<form\b[^>]*>[^<]*<form\b", html, re.I), f"{name}: nested form detected"
+
+          print("PASS: Python syntax, 8 POST route CSRF guards, and form token structure.")
+          PY

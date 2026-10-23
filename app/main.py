@@ -5,6 +5,8 @@ import hashlib
 import tempfile
 import zipfile
 import logging
+import time
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -28,6 +30,15 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").lower() in {"1", "true", "yes", "on"}
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+LOGIN_MAX_TRACKED_KEYS = 10_000
+LOGIN_CLEANUP_INTERVAL_SECONDS = 60
+LOGIN_CAPACITY_RETRY_SECONDS = 60
+_login_attempts: dict[str, tuple[int, float, float]] = {}
+_login_attempts_lock = threading.Lock()
+_last_login_cleanup = 0.0
 S3_ENDPOINT = os.getenv("AWS_ENDPOINT_URL_S3", "").strip()
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2").strip()
 S3_BUCKET = os.getenv("S3_BUCKET", "archive-files").strip()
@@ -184,9 +195,105 @@ def require_admin(request: Request):
     return user
 
 
+def get_csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+def validate_csrf(request: Request, submitted_token: str) -> None:
+    expected = request.session.get("csrf_token", "")
+    if not expected or not secrets.compare_digest(str(expected), str(submitted_token or "")):
+        raise HTTPException(status_code=403, detail="Security token invalid or expired. Refresh the page and try again.")
+
+
+def login_rate_key(request: Request) -> str:
+    """Throttle by client IP only, so changing usernames cannot bypass the limit."""
+    return request.client.host if request.client else "unknown"
+
+
+def _cleanup_login_attempts(now: float, *, force: bool = False) -> None:
+    """Remove expired throttle entries; caller must hold _login_attempts_lock."""
+    global _last_login_cleanup
+    if not force and now - _last_login_cleanup < LOGIN_CLEANUP_INTERVAL_SECONDS:
+        return
+    expired = [
+        key for key, (_, window_start, blocked_until) in _login_attempts.items()
+        if blocked_until <= now and now - window_start >= LOGIN_WINDOW_SECONDS
+    ]
+    for key in expired:
+        _login_attempts.pop(key, None)
+    _last_login_cleanup = now
+
+
+def login_is_blocked(key: str) -> tuple[bool, int]:
+    now = time.monotonic()
+    with _login_attempts_lock:
+        _cleanup_login_attempts(now)
+        entry = _login_attempts.get(key)
+        if entry is None and len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+            # Fail closed instead of allowing unlimited unique keys to grow memory.
+            _cleanup_login_attempts(now, force=True)
+            if len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+                return True, LOGIN_CAPACITY_RETRY_SECONDS
+            entry = None
+        if entry is None:
+            return False, 0
+        _, window_start, blocked_until = entry
+        if blocked_until > now:
+            return True, max(1, int(blocked_until - now))
+        if now - window_start >= LOGIN_WINDOW_SECONDS or blocked_until:
+            _login_attempts[key] = (0, now, 0.0)
+    return False, 0
+
+
+def record_login_failure(key: str) -> int:
+    now = time.monotonic()
+    with _login_attempts_lock:
+        _cleanup_login_attempts(now)
+        entry = _login_attempts.get(key)
+        if entry is None and len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+            _cleanup_login_attempts(now, force=True)
+            if len(_login_attempts) >= LOGIN_MAX_TRACKED_KEYS:
+                return LOGIN_CAPACITY_RETRY_SECONDS
+            entry = None
+        attempts, window_start, blocked_until = entry or (0, now, 0.0)
+        if now - window_start >= LOGIN_WINDOW_SECONDS or blocked_until:
+            attempts, window_start, blocked_until = 0, now, 0.0
+        attempts += 1
+        if attempts >= LOGIN_FAILURE_LIMIT:
+            blocked_until = now + LOGIN_LOCKOUT_SECONDS
+        _login_attempts[key] = (attempts, window_start, blocked_until)
+        return max(1, int(blocked_until - now)) if blocked_until > now else 0
+
+
+def clear_login_failures(key: str) -> None:
+    with _login_attempts_lock:
+        _login_attempts.pop(key, None)
+
+
+@app.middleware("http")
+async def request_size_guard(request: Request, call_next):
+    # Reject oversized requests early when Content-Length is supplied.
+    # The upload handler still enforces actual bytes read.
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError:
+            return PlainTextResponse("Invalid Content-Length", status_code=400)
+        limit = (MAX_UPLOAD_MB + 12) * 1024 * 1024 if request.url.path == "/submit" and request.method == "POST" else 2 * 1024 * 1024
+        if content_length < 0 or content_length > limit:
+            return PlainTextResponse("Request body too large", status_code=413)
+    return await call_next(request)
+
+
 def page(request: Request, template: str, **context):
     if not context.get("user"):
         context["user"] = current_user(request)
+    context.setdefault("csrf_token", get_csrf_token(request))
     return templates.TemplateResponse(request=request, name=template, context=context)
 
 
@@ -250,10 +357,11 @@ def s3_put(local_path: str, key: str, content_type: str):
 
 
 def s3_delete(key: str):
+    """Delete an uploaded object; log failures so orphaned objects can be investigated."""
     try:
         s3_client().delete_object(Bucket=S3_BUCKET, Key=key)
     except Exception:
-        pass
+        logging.exception("Failed to delete object from storage: key=%s", key)
 
 
 def stream_s3_object(key: str, filename: str, content_type: str):
@@ -309,7 +417,8 @@ def register_page(request: Request):
 
 
 @app.post("/register")
-def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...)):
+def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     username = username.strip()
     invite_code = invite.strip()
     invite_digest = hashlib.sha256(invite_code.encode("utf-8")).hexdigest()
@@ -340,6 +449,7 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
             conn.commit()
     except IntegrityError:
         return page(request, "register.html", error="用户名已存在，请更换用户名。")
+    request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
 
@@ -350,18 +460,28 @@ def login_page(request: Request):
 
 
 @app.post("/login")
-def login(request: Request, username: str = Form(...), password: str = Form(...)):
+def login(request: Request, username: str = Form(...), password: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    key = login_rate_key(request)
+    blocked, retry_after = login_is_blocked(key)
+    if blocked:
+        return page(request, "login.html", error=f"登录尝试过多，请在 {retry_after} 秒后重试。")
     with db_connect() as conn:
         user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (username.strip(),)).fetchone()
     if not user or not verify_password(password, user["password_hash"]):
+        retry_after = record_login_failure(key)
+        if retry_after:
+            return page(request, "login.html", error=f"登录失败次数过多，当前 IP 已暂时限制登录，请在 {retry_after} 秒后重试。")
         return page(request, "login.html", error="用户名或密码不正确。")
+    clear_login_failures(key)
     request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
 
 
 @app.post("/logout")
-def logout(request: Request):
+def logout(request: Request, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     request.session.clear()
     return RedirectResponse("/", status_code=303)
 
@@ -382,7 +502,9 @@ async def submit_resource(
     description: str = Form(""),
     archive: UploadFile = File(...),
     cover: UploadFile | None = File(None),
+    csrf_token: str = Form(...),
 ):
+    validate_csrf(request, csrf_token)
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -429,8 +551,15 @@ async def submit_resource(
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
-    except HTTPException as exc:
-        raise exc
+    except HTTPException:
+        # A validation/size error can happen after the archive has already been
+        # uploaded (for example, while saving or validating the optional cover).
+        # Best-effort cleanup prevents inaccessible objects from accumulating.
+        if archive_key:
+            s3_delete(archive_key)
+        if cover_key:
+            s3_delete(cover_key)
+        raise
     except (BotoCoreError, ClientError, RuntimeError) as exc:
         if archive_key:
             s3_delete(archive_key)
@@ -523,7 +652,8 @@ def admin_page(request: Request, notice: str = ""):
 
 
 @app.post("/admin/invites")
-def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1)):
+def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     max_uses = max(1, min(int(max_uses), 1000))
     label = label.strip()[:100]
@@ -540,7 +670,8 @@ def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(
 
 
 @app.post("/admin/invites/{invite_id}/toggle")
-def toggle_invite(request: Request, invite_id: int):
+def toggle_invite(request: Request, invite_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     require_admin(request)
     with db_connect() as conn:
         conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses", (invite_id,))
@@ -549,7 +680,8 @@ def toggle_invite(request: Request, invite_id: int):
 
 
 @app.post("/admin/resources/{resource_id}/review")
-def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form("")):
+def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form(""), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="Invalid review action")
@@ -561,7 +693,8 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
 
 
 @app.post("/admin/users/{user_id}/role")
-def change_user_role(request: Request, user_id: int, role: str = Form(...)):
+def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     if role not in {"user", "admin"}:
         raise HTTPException(status_code=400, detail="Invalid role")

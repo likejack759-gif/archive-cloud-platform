@@ -57,6 +57,27 @@ code{background:#eef4ff;color:#315c9f;padding:3px 6px;border-radius:6px}
 @media(max-width:640px){.wrap{padding:13px}header{align-items:flex-start;margin-bottom:18px}.brand{font-size:18px}nav{gap:3px}nav>a{padding:7px 8px;font-size:13px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.resource-body{padding:11px}.resource h3{font-size:15px}.panel{padding:15px;border-radius:16px}h2{font-size:19px}.cover{aspect-ratio:3/2}button,.btn{padding:10px 12px}}
 @media(max-width:380px){.grid{grid-template-columns:1fr}.cover{aspect-ratio:16/9}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+
+/* Accessibility and mobile navigation polish */
+:focus-visible{outline:3px solid rgba(52,120,246,.58);outline-offset:3px}
+button:disabled,.btn[aria-disabled="true"]{opacity:.6;cursor:not-allowed;transform:none}
+img{max-width:100%}
+.resource-body{min-width:0}
+.resource p,.resource h3{overflow-wrap:anywhere}
+@media(max-width:640px){
+  header{gap:12px}
+  nav{width:100%;padding-top:4px}
+  nav>a{flex:0 0 auto}
+  nav form.inline{margin-left:auto}
+  .panel{overflow-wrap:anywhere}
+  .table-wrap{max-width:100%;-webkit-overflow-scrolling:touch}
+  input,textarea,select,button,.btn{min-height:42px}
+  .row>.btn,.row>button{max-width:100%}
+}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+}
+
 </style>
 </head><body><div class="wrap">
 <header><a class="brand" href="/"><span class="logo">✦</span><span>云端资源库<small style="display:block;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:1.2px">CLOUD FILE CENTER</small></span></a>
@@ -64,7 +85,7 @@ code{background:#eef4ff;color:#315c9f;padding:3px 6px;border-radius:6px}
 {% if user %}
 <a href="/">资源首页</a><a href="/submit">提交资源</a><a href="/my-resources">个人中心</a>
 {% if user.role == 'admin' %}<a href="/admin">管理后台</a>{% endif %}
-<form class="inline" method="post" action="/logout"><button class="secondary" type="submit">退出登录</button></form>
+<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">退出登录</button></form>
 {% else %}<a href="/login">登录</a><a href="/register">邀请码注册</a>{% endif %}
 </nav></header>
 {% block content %}{% endblock %}

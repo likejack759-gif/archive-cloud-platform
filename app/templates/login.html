@@ -2,5 +2,5 @@
 <div class="panel" style="max-width:500px;margin:28px auto;padding:clamp(20px,5vw,34px)">
 <div class="tag">WELCOME BACK</div><h1>欢迎回来</h1><p class="muted">登录后即可浏览已审核资源并下载到手机。</p>
 {% if registered %}<div class="notice">注册成功，请登录。</div>{% endif %}{% if error %}<div class="notice error">{{ error }}</div>{% endif %}
-<form method="post" action="/login"><label>用户名</label><input name="username" autocomplete="username" required maxlength="32" placeholder="输入用户名"><label>密码</label><input name="password" type="password" autocomplete="current-password" required placeholder="输入密码"><button style="width:100%;margin-top:4px">登录账号 →</button></form>
+<form method="post" action="/login"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>用户名</label><input name="username" autocomplete="username" required maxlength="32" placeholder="输入用户名"><label>密码</label><input name="password" type="password" autocomplete="current-password" required placeholder="输入密码"><button style="width:100%;margin-top:4px">登录账号 →</button></form>
 <p class="muted small" style="text-align:center;margin-top:18px">还没有账号？<a href="/register">使用邀请码注册</a></p></div>{% endblock %}
