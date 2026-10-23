@@ -20,13 +20,14 @@ Compression is lossless, but many ZIP/7Z/RAR/APK files will not shrink further. 
 - The row is marked `deleting` before storage deletion. If an object-store delete fails, the row remains for investigation/retry rather than claiming success.
 - Object storage backup/version retention is independent; deleting the live resource does not promise immediate erasure from backup history.
 
-## IP ban / unban
+## IP ban / unban and anti-crawler throttling
 
 - Administrators can ban an exact IPv4 or IPv6 address for 10 minutes, 1 hour, 24 hours, or permanently.
 - The current admin client IP cannot be banned through the UI.
 - Expired bans stop applying automatically; administrators can revoke active bans manually.
 - Every successful ban, unban, or resource deletion is recorded in `security_audit_log`.
 - IP bans are exact-address only, not CIDR ranges. Shared/public IPs can represent many legitimate visitors, so use short durations unless reviewed.
+- A bounded in-process request limiter defaults to 120 requests per IP per 60 seconds and returns HTTP 429 with `Retry-After`; `/health` is exempt. Tune `REQUEST_RATE_LIMIT` and `REQUEST_RATE_WINDOW_SECONDS` carefully. This limiter is per app process, so Nginx-level limiting should also be used for multi-worker/multi-instance deployments.
 
 ### Reverse-proxy requirement
 
