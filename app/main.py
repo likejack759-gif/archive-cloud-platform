@@ -628,6 +628,10 @@ def compress_if_smaller(path: str) -> tuple[str, str, int]:
     """Losslessly wrap the file in Zstandard only if at least 1% smaller."""
     compressed_path = None
     try:
+        original_size = os.path.getsize(path)
+        # Keep a safety margin so temporary compression cannot exhaust the disk.
+        if shutil.disk_usage(os.path.dirname(path) or ".").free < original_size + 256 * 1024 * 1024:
+            return path, "raw", original_size
         fd, compressed_path = tempfile.mkstemp(prefix="archive-store-", suffix=".zst")
         os.close(fd)
         with open(path, "rb") as source, open(compressed_path, "wb") as target:
