@@ -246,9 +246,9 @@ def validate_csrf(request: Request, submitted_token: str) -> None:
         raise HTTPException(status_code=403, detail="Security token invalid or expired. Refresh the page and try again.")
 
 
-def login_rate_key(request: Request, username: str) -> str:
-    client_host = request.client.host if request.client else "unknown"
-    return f"{client_host}:{username.strip().casefold()[:128]}"
+def login_rate_key(request: Request, username: str = "") -> str:
+    # IP-wide throttling prevents bypass by rotating usernames.
+    return get_client_ip(request)
 
 
 def _cleanup_login_attempts(now: float, *, force: bool = False) -> None:
@@ -324,7 +324,53 @@ async def request_size_guard(request: Request, call_next):
         limit = (MAX_UPLOAD_MB + 12) * 1024 * 1024 if request.url.path == "/submit" and request.method == "POST" else 2 * 1024 * 1024
         if content_length < 0 or content_length > limit:
             return PlainTextResponse("Request body too large", status_code=413)
+    if request.url.path != "/health":
+        try:
+            client_ip = get_client_ip(request)
+            with db_connect() as conn:
+                ban = conn.execute(
+                    "SELECT reason FROM ip_bans WHERE ip_address=%s AND revoked_at IS NULL "
+                    "AND (expires_at IS NULL OR expires_at > NOW())",
+                    (client_ip,),
+                ).fetchone()
+            if ban:
+                return PlainTextResponse("Access temporarily restricted", status_code=403, headers={"Cache-Control": "no-store"})
+        except Exception:
+            logging.exception("IP ban check failed")
+            return PlainTextResponse("Access control temporarily unavailable", status_code=503)
     return await call_next(request)
+
+
+TRUSTED_PROXY_IPS = {
+    value.strip() for value in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",") if value.strip()
+}
+
+
+def get_client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    # Trust X-Real-IP only from an explicitly trusted reverse proxy.
+    if peer in TRUSTED_PROXY_IPS:
+        forwarded = request.headers.get("x-real-ip", "").strip()
+        try:
+            return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    try:
+        return str(ipaddress.ip_address(peer))
+    except ValueError:
+        return "unknown"
+
+
+def audit_security_event(actor_user_id: int | None, action: str, target: str = "", details: str = "") -> None:
+    try:
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO security_audit_log (actor_user_id,action,target,details) VALUES (%s,%s,%s,%s)",
+                (actor_user_id, action[:80], target[:200], details[:1000]),
+            )
+            conn.commit()
+    except Exception:
+        logging.exception("Failed to write security audit event: %s", action)
 
 
 def page(request: Request, template: str, **context):
