@@ -1,0 +1,41 @@
+name: AI Bug Repair Agent
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: ai-repair-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: startsWith(github.event.issue.title, '[Cloud File Center bug report #')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Run restricted AI repair agent
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AI_REPAIR_MODEL: gpt-4.1-mini
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: python scripts/ai_repair_agent.py
