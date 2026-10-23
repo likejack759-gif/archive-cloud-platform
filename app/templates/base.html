@@ -28,6 +28,7 @@ p{line-height:1.75}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(225px,100%),1fr));gap:16px;min-width:0}
 .resource{overflow:hidden;padding:0;transition:transform .18s ease,box-shadow .18s ease}
 .resource:hover{transform:translateY(-3px);box-shadow:0 16px 36px rgba(67,64,133,.12)}
+.resource-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .cover{width:100%;aspect-ratio:4/3;object-fit:cover;background:linear-gradient(135deg,#f0efff,#e0f5f7);display:block}
 .resource-body{padding:16px;min-width:0}
 .resource h3{margin:0 0 8px;overflow-wrap:anywhere;color:#34375f}
@@ -71,6 +72,7 @@ pre{max-width:100%;overflow:auto;border-radius:14px}
  h2{font-size:19px}
  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
  .resource-body{padding:11px}
+ .resource-actions{gap:6px}
  .resource h3{font-size:14px}
  .cover{aspect-ratio:3/2}
  .row{gap:8px}
@@ -83,6 +85,7 @@ pre{max-width:100%;overflow:auto;border-radius:14px}
 @media(max-width:390px){
  .wrap{padding-inline:9px}
  .grid{grid-template-columns:minmax(0,1fr)}
+ .resource-actions{grid-template-columns:1fr}
  .cover{aspect-ratio:16/9}
  .panel{padding:13px}
  .row>.btn,.row>button{max-width:100%}
