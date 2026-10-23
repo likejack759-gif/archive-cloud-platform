@@ -110,6 +110,7 @@ img{max-width:100%}
 {% if user.role == 'admin' %}<a href="/admin">管理后台</a>{% endif %}
 <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">退出登录</button></form>
 {% else %}<a href="/login">登录</a><a href="/register">邀请码注册</a>{% endif %}
+<a href="/feedback">问题反馈</a>
 </nav></header>
 {% block content %}{% endblock %}
 <div class="footer">云端资源库 · 资源经审核后开放 · 请勿上传违法或侵权文件</div>
