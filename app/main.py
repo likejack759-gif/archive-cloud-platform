@@ -940,11 +940,16 @@ async def submit_resource(
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
-    except HTTPException:
+    except HTTPException as exc:
         if archive_key:
             s3_delete(archive_key)
         if cover_key:
             s3_delete(cover_key)
+        if exc.status_code == 413:
+            message = str(exc.detail or "文件超过上传上限。")
+            if "平台存储空间已满" not in message and "上传上限" not in message and "exceeds" not in message and "超过" not in message:
+                message = "文件超过上传上限 {{max}} MB，请选择较小的文件后重试。".replace("{{max}}", str(MAX_UPLOAD_MB))
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error=message)
         raise
     except (BotoCoreError, ClientError, RuntimeError) as exc:
         if archive_key:
