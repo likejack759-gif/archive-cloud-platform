@@ -1003,8 +1003,9 @@ def admin_page(request: Request, notice: str = ""):
         users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
         all_resources = conn.execute("SELECT r.id,r.name,r.original_filename,r.status,r.size_bytes,r.created_at,u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 100").fetchall()
         bans = conn.execute("SELECT b.*,u.username AS creator_name FROM ip_bans b LEFT JOIN users u ON u.id=b.created_by WHERE b.revoked_at IS NULL AND (b.expires_at IS NULL OR b.expires_at > NOW()) ORDER BY b.created_at DESC LIMIT 200").fetchall()
+        audit_events = conn.execute("SELECT a.*,u.username AS actor_name FROM security_audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
-    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, all_resources=all_resources, bans=bans, notice=notice)
+    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, all_resources=all_resources, bans=bans, audit_events=audit_events, notice=notice)
 
 
 @app.post("/admin/invites")
