@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import zipfile
 import logging
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -13,12 +14,14 @@ import psycopg
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, PlainTextResponse, JSONResponse, FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from psycopg.rows import dict_row
 from psycopg.errors import IntegrityError
+from app.upload_security import clamav_ping, clamav_scan, inspect_zip_archive, safe_object_key
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -27,6 +30,11 @@ SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+MAX_USER_STORAGE_MB = int(os.getenv("MAX_USER_STORAGE_MB", "10240"))
+MAX_PLATFORM_STORAGE_GB = int(os.getenv("MAX_PLATFORM_STORAGE_GB", "50"))
+LOGIN_FAILURE_LIMIT = int(os.getenv("LOGIN_FAILURE_LIMIT", "10"))
+LOGIN_WINDOW_MINUTES = int(os.getenv("LOGIN_WINDOW_MINUTES", "15"))
+TRUSTED_PROXY_IPS = {value.strip() for value in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",") if value.strip()}
 SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").lower() in {"1", "true", "yes", "on"}
 S3_ENDPOINT = os.getenv("AWS_ENDPOINT_URL_S3", "").strip()
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2").strip()
@@ -115,6 +123,28 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log (created_at DESC)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id BIGSERIAL PRIMARY KEY,
+                username_hash TEXT NOT NULL,
+                ip_hash TEXT NOT NULL,
+                succeeded BOOLEAN NOT NULL DEFAULT FALSE,
+                attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts (username_hash, ip_hash, attempted_at DESC)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS resources (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -141,6 +171,9 @@ def init_db():
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_status TEXT NOT NULL DEFAULT 'pending'")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_result TEXT NOT NULL DEFAULT 'Not scanned'")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS sha256 TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS max_uses INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS uses INTEGER NOT NULL DEFAULT 0")
@@ -170,12 +203,30 @@ def init_db():
 
 
 @app.on_event("startup")
+def ensure_s3_bucket(max_attempts: int = 30) -> None:
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            client = s3_client()
+            try:
+                client.head_bucket(Bucket=S3_BUCKET)
+            except ClientError:
+                client.create_bucket(Bucket=S3_BUCKET)
+            return
+        except (BotoCoreError, ClientError, RuntimeError) as exc:
+            last_error = exc
+            if attempt + 1 < max_attempts:
+                time.sleep(2)
+    raise RuntimeError(f"Object storage is not ready or credentials are invalid: {type(last_error).__name__}")
+
+
 def startup():
     if not SECRET_KEY:
         raise RuntimeError("Set SECRET_KEY in your deployment environment")
     if not DATABASE_URL:
         raise RuntimeError("Set DATABASE_URL in your deployment environment")
     init_db()
+    ensure_s3_bucket()
 
 
 def current_user(request: Request):
@@ -200,9 +251,65 @@ def require_admin(request: Request):
     return user
 
 
+def get_csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+def validate_csrf(request: Request, submitted_token: str) -> None:
+    expected = request.session.get("csrf_token", "")
+    if not expected or not secrets.compare_digest(str(expected), str(submitted_token or "")):
+        raise HTTPException(status_code=403, detail="Security token invalid or expired. Refresh the page and try again.")
+
+
+def client_ip_for_security(request: Request) -> str:
+    peer = request.client.host if request.client else ""
+    if peer in TRUSTED_PROXY_IPS:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if forwarded and len(forwarded) <= 64 and re.fullmatch(r"[0-9a-fA-F:.]+", forwarded):
+            return forwarded
+    return peer or "unknown"
+
+
+def login_is_limited(username: str, ip_address: str) -> bool:
+    username_hash = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()
+    ip_hash = hashlib.sha256(ip_address.encode("utf-8")).hexdigest()
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS failures FROM login_attempts WHERE username_hash=%s AND ip_hash=%s AND succeeded=FALSE AND attempted_at > NOW() - (%s * INTERVAL '1 minute')",
+            (username_hash, ip_hash, LOGIN_WINDOW_MINUTES),
+        ).fetchone()
+        return int(row["failures"] or 0) >= LOGIN_FAILURE_LIMIT
+
+
+def record_login_attempt(username: str, ip_address: str, succeeded: bool) -> None:
+    username_hash = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()
+    ip_hash = hashlib.sha256(ip_address.encode("utf-8")).hexdigest()
+    with db_connect() as conn:
+        if succeeded:
+            conn.execute("DELETE FROM login_attempts WHERE username_hash=%s AND ip_hash=%s AND succeeded=FALSE", (username_hash, ip_hash))
+        conn.execute(
+            "INSERT INTO login_attempts (username_hash, ip_hash, succeeded) VALUES (%s,%s,%s)",
+            (username_hash, ip_hash, succeeded),
+        )
+        conn.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '7 days'")
+        conn.commit()
+
+
+def write_admin_audit(conn, admin_user_id: int, action: str, target_type: str, target_id: str = "", details: str = "") -> None:
+    conn.execute(
+        "INSERT INTO admin_audit_log (admin_user_id, action, target_type, target_id, details) VALUES (%s,%s,%s,%s,%s)",
+        (admin_user_id, action[:80], target_type[:80], str(target_id)[:120], details[:500]),
+    )
+
+
 def page(request: Request, template: str, **context):
     if not context.get("user"):
         context["user"] = current_user(request)
+    context["csrf_token"] = get_csrf_token(request)
     return templates.TemplateResponse(request=request, name=template, context=context)
 
 
@@ -245,7 +352,8 @@ def feedback_page(request: Request, sent: str = ""):
 
 
 @app.post("/feedback")
-def submit_feedback(request: Request, title: str = Form(...), description: str = Form(...), steps: str = Form(""), error_log: str = Form(""), reporter: str = Form(""), page_url: str = Form("")):
+def submit_feedback(request: Request, title: str = Form(...), description: str = Form(...), steps: str = Form(""), error_log: str = Form(""), reporter: str = Form(""), page_url: str = Form(""), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     title = title.strip()[:180]
     description = description.strip()[:5000]
     steps = steps.strip()[:5000]
@@ -285,7 +393,8 @@ def admin_feedback_page(request: Request):
 
 
 @app.post("/admin/feedback/{report_id}/status")
-def update_feedback_status(request: Request, report_id: int, status: str = Form(...)):
+def update_feedback_status(request: Request, report_id: int, status: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     require_admin(request)
     if status not in {"new","investigating","resolved","ignored"}:
         raise HTTPException(status_code=400, detail="Invalid report status")
@@ -414,14 +523,15 @@ def register_page(request: Request):
 
 
 @app.post("/register")
-def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...)):
+def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     username = username.strip()
     invite_code = invite.strip()
     invite_digest = hashlib.sha256(invite_code.encode("utf-8")).hexdigest()
     if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
         return page(request, "register.html", error="用户名需为 3–32 位字母、数字、点、下划线或连字符。")
-    if len(password) < 10:
-        return page(request, "register.html", error="密码至少需要 10 个字符。")
+    if len(password) < 10 or len(password) > 128:
+        return page(request, "register.html", error="密码长度必须为 10–128 个字符。")
     try:
         with db_connect() as conn:
             invite_row = conn.execute(
@@ -445,6 +555,7 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
             conn.commit()
     except IntegrityError:
         return page(request, "register.html", error="用户名已存在，请更换用户名。")
+    request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
 
@@ -455,18 +566,26 @@ def login_page(request: Request):
 
 
 @app.post("/login")
-def login(request: Request, username: str = Form(...), password: str = Form(...)):
+def login(request: Request, username: str = Form(...), password: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    normalized_username = username.strip()
+    ip_address = client_ip_for_security(request)
+    if login_is_limited(normalized_username, ip_address):
+        raise HTTPException(status_code=429, detail="登录尝试过多，请稍后再试。")
     with db_connect() as conn:
-        user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (username.strip(),)).fetchone()
+        user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (normalized_username,)).fetchone()
     if not user or not verify_password(password, user["password_hash"]):
+        record_login_attempt(normalized_username, ip_address, False)
         return page(request, "login.html", error="用户名或密码不正确。")
+    record_login_attempt(normalized_username, ip_address, True)
     request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
 
 
 @app.post("/logout")
-def logout(request: Request):
+def logout(request: Request, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     request.session.clear()
     return RedirectResponse("/", status_code=303)
 
@@ -487,7 +606,9 @@ async def submit_resource(
     description: str = Form(""),
     archive: UploadFile = File(...),
     cover: UploadFile | None = File(None),
+    csrf_token: str = Form(...),
 ):
+    validate_csrf(request, csrf_token)
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -505,9 +626,36 @@ async def submit_resource(
     cover_key = None
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     try:
+        with db_connect() as conn:
+            conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+            user_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE user_id=%s AND status <> 'rejected'", (user["id"],)).fetchone()
+            platform_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE status <> 'rejected'").fetchone()
+            user_limit = MAX_USER_STORAGE_MB * 1024 * 1024
+            platform_limit = MAX_PLATFORM_STORAGE_GB * 1024 * 1024 * 1024
+            user_used = int(user_usage["used"] or 0)
+            platform_used = int(platform_usage["used"] or 0)
+            if user_used >= user_limit:
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="已达到个人存储配额，请联系管理员。")
+            if platform_used >= platform_limit:
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="平台存储容量暂时已满，请稍后再试。")
+            max_bytes = min(max_bytes, user_limit - user_used, platform_limit - platform_used)
         archive_path, archive_size = await save_upload_to_temp(archive, max_bytes)
+        archive_hash = hashlib.sha256()
+        with open(archive_path, "rb") as archive_source:
+            for digest_chunk in iter(lambda: archive_source.read(1024 * 1024), b""):
+                archive_hash.update(digest_chunk)
+        archive_sha256 = archive_hash.hexdigest()
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
+        if Path(archive_filename).suffix.lower() in {".zip", ".apk"}:
+            archive_safe, archive_reason = inspect_zip_archive(archive_path)
+            if not archive_safe:
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="压缩包安全检查未通过：" + archive_reason)
+        scan_status, scan_result = clamav_scan(archive_path)
+        if scan_status != "clean":
+            message = "安全扫描检测到恶意文件，已拒绝上传。" if scan_status == "infected" else "病毒扫描服务暂不可用，文件未上传；请管理员检查 ClamAV 服务。"
+            logging.warning("Upload rejected by scanner status=%s result=%s", scan_status, scan_result[:300])
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error=message)
         archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
         content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
         s3_put(archive_path, archive_key, content_type)
@@ -528,13 +676,28 @@ async def submit_resource(
             mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}[ext]
             s3_put(cover_path, cover_key, mime)
         with db_connect() as conn:
+            # Serialize the final quota check and insert across all upload requests.
+            conn.execute("SELECT pg_advisory_xact_lock(71420261024)")
+            conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+            user_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE user_id=%s AND status <> 'rejected'", (user["id"],)).fetchone()
+            platform_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE status <> 'rejected'").fetchone()
+            if int(user_usage["used"] or 0) + archive_size > MAX_USER_STORAGE_MB * 1024 * 1024:
+                raise HTTPException(status_code=507, detail="User storage quota exceeded")
+            if int(platform_usage["used"] or 0) + archive_size > MAX_PLATFORM_STORAGE_GB * 1024 * 1024 * 1024:
+                raise HTTPException(status_code=507, detail="Platform storage quota exceeded")
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s)",
-                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,scan_status,scan_result,sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, scan_status, scan_result[:500], archive_sha256),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
     except HTTPException as exc:
+        if archive_key:
+            s3_delete(archive_key)
+        if cover_key:
+            s3_delete(cover_key)
+        if exc.status_code == 507:
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="存储配额已满，请删除不需要的资源或联系管理员。")
         raise exc
     except (BotoCoreError, ClientError, RuntimeError) as exc:
         if archive_key:
@@ -583,6 +746,52 @@ def cover_file(request: Request, filename: str):
     return stream_s3_object(filename, Path(filename).name, mime)
 
 
+def _remove_temp_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def verified_download_response(resource, key: str, filename: str):
+    expected = (resource.get("sha256") or "").strip().lower()
+    if not expected:
+        # Legacy resources have no recorded digest; scanning still gates access.
+        try:
+            obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+        except ClientError:
+            raise HTTPException(status_code=502, detail="Unable to retrieve file")
+        body = obj["Body"]
+        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+        return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type="application/octet-stream", headers=headers)
+
+    fd, path = tempfile.mkstemp(prefix="archive-download-")
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(fd, "wb") as output:
+            try:
+                obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+            except ClientError:
+                raise HTTPException(status_code=502, detail="Unable to retrieve file")
+            body = obj["Body"]
+            try:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    if chunk:
+                        digest.update(chunk)
+                        output.write(chunk)
+            finally:
+                body.close()
+        if not secrets.compare_digest(digest.hexdigest(), expected):
+            with db_connect() as conn:
+                conn.execute("UPDATE resources SET scan_status='error', scan_result='SHA-256 integrity mismatch' WHERE id=%s", (resource["id"],))
+                conn.commit()
+            raise HTTPException(status_code=502, detail="File integrity verification failed; administrator has been notified")
+        return FileResponse(path, media_type="application/octet-stream", filename=filename, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}, background=BackgroundTask(_remove_temp_file, path))
+    except Exception:
+        _remove_temp_file(path)
+        raise
+
+
 @app.get("/download/{resource_id}")
 def download_resource(request: Request, resource_id: int):
     user = current_user(request)
@@ -590,25 +799,15 @@ def download_resource(request: Request, resource_id: int):
         return RedirectResponse("/login", status_code=303)
     with db_connect() as conn:
         resource = conn.execute("SELECT * FROM resources WHERE id=%s", (resource_id,)).fetchone()
-        if not resource or resource["status"] != "approved":
+        if not resource or resource["status"] != "approved" or resource.get("scan_status", "pending") != "clean":
             raise HTTPException(status_code=404, detail="Resource not found")
         conn.execute("UPDATE resources SET downloads=downloads+1 WHERE id=%s", (resource_id,))
         conn.commit()
     key = resource["filename"]
-    if not key.startswith("files/") or ".." in key:
+    if not safe_object_key(key, "files/"):
         raise HTTPException(status_code=404, detail="File not found")
-    try:
-        obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
-    except ClientError:
-        raise HTTPException(status_code=502, detail="Unable to retrieve file")
-    body = obj["Body"]
     filename = safe_name(resource["original_filename"] or Path(key).name)
-    headers = {
-        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
-        "Cache-Control": "private, no-store",
-        "X-Content-Type-Options": "nosniff",
-    }
-    return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type="application/octet-stream", headers=headers)
+    return verified_download_response(resource, key, filename)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -621,14 +820,17 @@ def admin_page(request: Request, notice: str = ""):
     with db_connect() as conn:
         stats_row = conn.execute("SELECT (SELECT COUNT(*) FROM users) AS users, (SELECT COUNT(*) FROM resources) AS resources, (SELECT COUNT(*) FROM resources WHERE status='pending') AS pending, (SELECT COUNT(*) FROM resources WHERE status='approved') AS approved").fetchone()
         pending = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
+        unscanned = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE COALESCE(r.scan_status,'pending') <> 'clean' ORDER BY r.created_at DESC LIMIT 100").fetchall()
         invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
         users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
+        audit_logs = conn.execute("SELECT a.*, u.username AS admin_name FROM admin_audit_log a LEFT JOIN users u ON u.id=a.admin_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
-    return page(request, "admin.html", user=user, stats=stats, pending=pending, invites=invites, users=users, notice=notice)
+    return page(request, "admin.html", user=user, stats=stats, pending=pending, unscanned=unscanned, invites=invites, users=users, audit_logs=audit_logs, notice=notice)
 
 
 @app.post("/admin/invites")
-def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1)):
+def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     max_uses = max(1, min(int(max_uses), 1000))
     label = label.strip()[:100]
@@ -639,55 +841,114 @@ def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(
             "INSERT INTO invites (code,created_by,is_active,label,max_uses,uses) VALUES (%s,%s,TRUE,%s,%s,0)",
             (code_digest, admin["id"], label, max_uses),
         )
+        write_admin_audit(conn, admin["id"], "invite.create", "invite", "new", f"label={label!r}; max_uses={max_uses}")
         conn.commit()
     request.session["new_invite"] = code
     return RedirectResponse("/admin?notice=invite_created", status_code=303)
 
 
 @app.post("/admin/invites/{invite_id}/toggle")
-def toggle_invite(request: Request, invite_id: int):
-    require_admin(request)
+def toggle_invite(request: Request, invite_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    admin = require_admin(request)
     with db_connect() as conn:
-        conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses", (invite_id,))
+        changed = conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses RETURNING is_active", (invite_id,)).fetchone()
+        if changed:
+            write_admin_audit(conn, admin["id"], "invite.toggle", "invite", invite_id, f"is_active={changed['is_active']}")
         conn.commit()
     return RedirectResponse("/admin?notice=invite_updated", status_code=303)
 
 
 @app.post("/admin/resources/{resource_id}/review")
-def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form("")):
+def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form(""), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="Invalid review action")
-    status = "approved" if action == "approve" else "rejected"
     with db_connect() as conn:
+        resource = conn.execute("SELECT scan_status FROM resources WHERE id=%s AND status='pending' FOR UPDATE", (resource_id,)).fetchone()
+        if not resource:
+            raise HTTPException(status_code=404, detail="Pending resource not found")
+        if action == "approve" and resource["scan_status"] != "clean":
+            raise HTTPException(status_code=409, detail="Cannot approve: resource has not passed a clean antivirus scan")
+        status = "approved" if action == "approve" else "rejected"
         conn.execute("UPDATE resources SET status=%s,review_note=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, review_note.strip()[:500], admin["id"], resource_id))
+        write_admin_audit(conn, admin["id"], f"resource.{status}", "resource", resource_id, f"note={review_note.strip()[:300]!r}")
         conn.commit()
     return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
 
 
+@app.post("/admin/resources/{resource_id}/rescan")
+def rescan_resource(request: Request, resource_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    admin = require_admin(request)
+    with db_connect() as conn:
+        resource = conn.execute("SELECT id, filename, status FROM resources WHERE id=%s", (resource_id,)).fetchone()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+    key = resource["filename"]
+    if not safe_object_key(key, "files/"):
+        raise HTTPException(status_code=404, detail="File not found")
+    fd, path = tempfile.mkstemp(prefix="archive-rescan-")
+    try:
+        with os.fdopen(fd, "wb") as target:
+            obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+            body = obj["Body"]
+            try:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    if chunk:
+                        target.write(chunk)
+            finally:
+                body.close()
+        scan_status, scan_result = clamav_scan(path)
+        with db_connect() as conn:
+            conn.execute("UPDATE resources SET scan_status=%s, scan_result=%s WHERE id=%s", (scan_status, scan_result[:500], resource_id))
+            if scan_status == "infected" and resource["status"] == "approved":
+                conn.execute("UPDATE resources SET status='pending', review_note=%s WHERE id=%s", ("已撤回：病毒扫描发现风险文件", resource_id))
+            write_admin_audit(conn, admin["id"], f"resource.rescan.{scan_status}", "resource", resource_id, scan_result[:300])
+            conn.commit()
+        return RedirectResponse("/admin?notice=resource_rescanned", status_code=303)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 @app.post("/admin/users/{user_id}/role")
-def change_user_role(request: Request, user_id: int, role: str = Form(...)):
+def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     if role not in {"user", "admin"}:
         raise HTTPException(status_code=400, detail="Invalid role")
     if user_id == admin["id"] and role != "admin":
         raise HTTPException(status_code=400, detail="You cannot remove your own administrator role")
     with db_connect() as conn:
+        target = conn.execute("SELECT username FROM users WHERE id=%s", (user_id,)).fetchone()
         conn.execute("UPDATE users SET role=%s WHERE id=%s", (role, user_id))
+        if target:
+            write_admin_audit(conn, admin["id"], "user.role_change", "user", user_id, f"username={target['username']!r}; role={role}")
         conn.commit()
     return RedirectResponse("/admin?notice=user_role_updated", status_code=303)
 
 
 @app.get("/health")
 def health():
-    result = {"status": "ok", "database": "unknown", "storage": "configured" if all([S3_ENDPOINT, os.getenv("AWS_ACCESS_KEY_ID"), os.getenv("AWS_SECRET_ACCESS_KEY"), S3_BUCKET]) else "missing_config"}
+    result = {"status": "ok", "database": "error", "storage": "error", "scanner": "error"}
     try:
         with db_connect() as conn:
             conn.execute("SELECT 1")
         result["database"] = "ok"
     except Exception:
+        pass
+    try:
+        s3_client().head_bucket(Bucket=S3_BUCKET)
+        result["storage"] = "ok"
+    except Exception:
+        pass
+    result["scanner"] = "ok" if clamav_ping() else "unavailable"
+    if any(result[name] != "ok" for name in ("database", "storage", "scanner")):
         result["status"] = "degraded"
-        result["database"] = "error"
     return JSONResponse(result, status_code=200 if result["status"] == "ok" else 503)
 
 

@@ -1,16 +1,82 @@
 services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-archive}
+      POSTGRES_USER: ${POSTGRES_USER:-archive}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-archive} -d ${POSTGRES_DB:-archive}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    restart: unless-stopped
+    command: ["server", "-s3", "-s3.config=/etc/seaweedfs/s3.json", "-dir=/data", "-ip=seaweedfs"]
+    volumes:
+      - seaweedfs_data:/data
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    expose:
+      - "8333"
+    # Keep the S3 API private to the Compose network; readiness is verified by the app.
+
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    expose:
+      - "3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+      - ./clamd.conf:/etc/clamav/clamd.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping=1 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+
   resource-platform:
     build: .
     container_name: cloud-resource-platform
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:8000:8000"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
-      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
-      DATA_DIR: /data
-    volumes:
-      - ./data:/data
+      MAX_USER_STORAGE_MB: ${MAX_USER_STORAGE_MB:-10240}
+      MAX_PLATFORM_STORAGE_GB: ${MAX_PLATFORM_STORAGE_GB:-50}
+      LOGIN_FAILURE_LIMIT: ${LOGIN_FAILURE_LIMIT:-10}
+      LOGIN_WINDOW_MINUTES: ${LOGIN_WINDOW_MINUTES:-15}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-127.0.0.1,::1}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-archive}:${DB_PASSWORD}@db:5432/${POSTGRES_DB:-archive}
+      AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-archive-files}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      CLAMAV_TIMEOUT_SECONDS: ${CLAMAV_TIMEOUT_SECONDS:-180}
+      MAX_ARCHIVE_MEMBERS: ${MAX_ARCHIVE_MEMBERS:-20000}
+      MAX_ARCHIVE_MEMBER_BYTES: ${MAX_ARCHIVE_MEMBER_BYTES:-2147483648}
+    depends_on:
+      db:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+      clamav:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  seaweedfs_data:
+  clamav_data:

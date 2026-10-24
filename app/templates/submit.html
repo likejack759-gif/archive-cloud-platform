@@ -7,7 +7,7 @@
   <p class="muted">补充清晰的名称、说明和封面，方便管理员审核与其他用户识别。审核通过后，资源才会出现在资源库中。</p>
   <div class="notice" style="background:#f2f7ff;border-color:#d8e7ff;color:#42648f">文件最大 {{ max_upload_mb }} MB；封面图片最大 8 MB。支持 ZIP、7Z、RAR 压缩包及 APK 文件。</div>
   {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
-  <form method="post" action="/submit" enctype="multipart/form-data">
+  <form method="post" action="/submit" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>资源类型</label>
     <select name="resource_type" required><option value="archive">压缩包（ZIP / 7Z / RAR）</option><option value="apk">安卓应用（APK）</option></select>
     <label>资源名称</label>

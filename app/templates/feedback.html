@@ -5,7 +5,7 @@
   <p>请描述问题、复现步骤及相关错误信息。报告会先保存在网站数据库中。</p>
   {% if sent %}<div class="notice">报告已提交，感谢协助改进。</div>{% endif %}
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
-  <form method="post" action="/feedback">
+  <form method="post" action="/feedback"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>问题标题 *</label><input name="title" maxlength="180" required value="{{ values.title if values else '' }}">
     <label>问题描述 *</label><textarea name="description" maxlength="5000" rows="5" required>{{ values.description if values else '' }}</textarea>
     <label>复现步骤</label><textarea name="steps" maxlength="5000" rows="4">{{ values.steps if values else '' }}</textarea>
