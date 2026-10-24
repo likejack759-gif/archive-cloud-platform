@@ -73,3 +73,19 @@ def test_download_rejects_sha256_mismatch(monkeypatch):
             "sample.zip",
         )
     assert exc.value.status_code == 502
+
+
+
+def test_admin_audit_records_action_without_secret_material():
+    calls = []
+
+    class AuditConnection:
+        def execute(self, sql, params):
+            calls.append((sql, params))
+
+    main.write_admin_audit(
+        AuditConnection(), 7, "resource.approved", "resource", 42, "reviewed"
+    )
+    assert len(calls) == 1
+    assert "INSERT INTO admin_audit_log" in calls[0][0]
+    assert calls[0][1] == (7, "resource.approved", "resource", "42", "reviewed")
