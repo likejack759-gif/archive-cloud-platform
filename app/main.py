@@ -28,6 +28,11 @@ SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
+MAX_USER_STORAGE_MB = int(os.getenv("MAX_USER_STORAGE_MB", "10240"))
+MAX_PLATFORM_STORAGE_GB = int(os.getenv("MAX_PLATFORM_STORAGE_GB", "50"))
+LOGIN_FAILURE_LIMIT = int(os.getenv("LOGIN_FAILURE_LIMIT", "10"))
+LOGIN_WINDOW_MINUTES = int(os.getenv("LOGIN_WINDOW_MINUTES", "15"))
+TRUSTED_PROXY_IPS = {value.strip() for value in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",") if value.strip()}
 SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").lower() in {"1", "true", "yes", "on"}
 S3_ENDPOINT = os.getenv("AWS_ENDPOINT_URL_S3", "").strip()
 AWS_REGION = os.getenv("AWS_REGION", "us-east-2").strip()
@@ -116,6 +121,16 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id BIGSERIAL PRIMARY KEY,
+                username_hash TEXT NOT NULL,
+                ip_hash TEXT NOT NULL,
+                succeeded BOOLEAN NOT NULL DEFAULT FALSE,
+                attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts (username_hash, ip_hash, attempted_at DESC)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS resources (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -144,6 +159,7 @@ def init_db():
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS review_note TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_status TEXT NOT NULL DEFAULT 'pending'")
         conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS scan_result TEXT NOT NULL DEFAULT 'Not scanned'")
+        conn.execute("ALTER TABLE resources ADD COLUMN IF NOT EXISTS sha256 TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS max_uses INTEGER NOT NULL DEFAULT 1")
         conn.execute("ALTER TABLE invites ADD COLUMN IF NOT EXISTS uses INTEGER NOT NULL DEFAULT 0")
@@ -215,6 +231,38 @@ def validate_csrf(request: Request, submitted_token: str) -> None:
     expected = request.session.get("csrf_token", "")
     if not expected or not secrets.compare_digest(str(expected), str(submitted_token or "")):
         raise HTTPException(status_code=403, detail="Security token invalid or expired. Refresh the page and try again.")
+
+
+def client_ip_for_security(request: Request) -> str:
+    peer = request.client.host if request.client else ""
+    if peer in TRUSTED_PROXY_IPS:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if forwarded and len(forwarded) <= 64 and re.fullmatch(r"[0-9a-fA-F:.]+", forwarded):
+            return forwarded
+    return peer or "unknown"
+
+
+def login_is_limited(username: str, ip_address: str) -> bool:
+    username_hash = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()
+    ip_hash = hashlib.sha256(ip_address.encode("utf-8")).hexdigest()
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS failures FROM login_attempts WHERE username_hash=%s AND ip_hash=%s AND succeeded=FALSE AND attempted_at > NOW() - (%s * INTERVAL '1 minute')",
+            (username_hash, ip_hash, LOGIN_WINDOW_MINUTES),
+        ).fetchone()
+        return int(row["failures"] or 0) >= LOGIN_FAILURE_LIMIT
+
+
+def record_login_attempt(username: str, ip_address: str, succeeded: bool) -> None:
+    username_hash = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()
+    ip_hash = hashlib.sha256(ip_address.encode("utf-8")).hexdigest()
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO login_attempts (username_hash, ip_hash, succeeded) VALUES (%s,%s,%s)",
+            (username_hash, ip_hash, succeeded),
+        )
+        conn.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '7 days'")
+        conn.commit()
 
 
 def page(request: Request, template: str, **context):
@@ -478,10 +526,16 @@ def login_page(request: Request):
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...), csrf_token: str = Form(...)):
     validate_csrf(request, csrf_token)
+    normalized_username = username.strip()
+    ip_address = client_ip_for_security(request)
+    if login_is_limited(normalized_username, ip_address):
+        raise HTTPException(status_code=429, detail="登录尝试过多，请稍后再试。")
     with db_connect() as conn:
-        user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (username.strip(),)).fetchone()
+        user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (normalized_username,)).fetchone()
     if not user or not verify_password(password, user["password_hash"]):
+        record_login_attempt(normalized_username, ip_address, False)
         return page(request, "login.html", error="用户名或密码不正确。")
+    record_login_attempt(normalized_username, ip_address, True)
     request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
@@ -530,7 +584,25 @@ async def submit_resource(
     cover_key = None
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     try:
+        with db_connect() as conn:
+            conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+            user_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE user_id=%s AND status <> 'rejected'", (user["id"],)).fetchone()
+            platform_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE status <> 'rejected'").fetchone()
+            user_limit = MAX_USER_STORAGE_MB * 1024 * 1024
+            platform_limit = MAX_PLATFORM_STORAGE_GB * 1024 * 1024 * 1024
+            user_used = int(user_usage["used"] or 0)
+            platform_used = int(platform_usage["used"] or 0)
+            if user_used >= user_limit:
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="已达到个人存储配额，请联系管理员。")
+            if platform_used >= platform_limit:
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="平台存储容量暂时已满，请稍后再试。")
+            max_bytes = min(max_bytes, user_limit - user_used, platform_limit - platform_used)
         archive_path, archive_size = await save_upload_to_temp(archive, max_bytes)
+        archive_hash = hashlib.sha256()
+        with open(archive_path, "rb") as archive_source:
+            for digest_chunk in iter(lambda: archive_source.read(1024 * 1024), b""):
+                archive_hash.update(digest_chunk)
+        archive_sha256 = archive_hash.hexdigest()
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
         if Path(archive_filename).suffix.lower() in {".zip", ".apk"}:
@@ -563,8 +635,8 @@ async def submit_resource(
             s3_put(cover_path, cover_key, mime)
         with db_connect() as conn:
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,scan_status,scan_result) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s)",
-                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, scan_status, scan_result[:500]),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,scan_status,scan_result,sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, scan_status, scan_result[:500], archive_sha256),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
