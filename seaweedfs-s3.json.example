@@ -1,0 +1,20 @@
+{
+  "identities": [
+    {
+      "name": "archive-platform",
+      "credentials": [
+        {
+          "accessKey": "REPLACE_WITH_MINIO_ROOT_USER",
+          "secretKey": "REPLACE_WITH_MINIO_ROOT_PASSWORD"
+        }
+      ],
+      "actions": [
+        "Admin",
+        "Read",
+        "List",
+        "Tagging",
+        "Write"
+      ]
+    }
+  ]
+}
