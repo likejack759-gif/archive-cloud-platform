@@ -653,6 +653,15 @@ async def submit_resource(
             mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".gif":"image/gif"}[ext]
             s3_put(cover_path, cover_key, mime)
         with db_connect() as conn:
+            # Serialize the final quota check and insert across all upload requests.
+            conn.execute("SELECT pg_advisory_xact_lock(71420261024)")
+            conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+            user_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE user_id=%s AND status <> 'rejected'", (user["id"],)).fetchone()
+            platform_usage = conn.execute("SELECT COALESCE(SUM(size_bytes),0) AS used FROM resources WHERE status <> 'rejected'").fetchone()
+            if int(user_usage["used"] or 0) + archive_size > MAX_USER_STORAGE_MB * 1024 * 1024:
+                raise HTTPException(status_code=507, detail="User storage quota exceeded")
+            if int(platform_usage["used"] or 0) + archive_size > MAX_PLATFORM_STORAGE_GB * 1024 * 1024 * 1024:
+                raise HTTPException(status_code=507, detail="Platform storage quota exceeded")
             conn.execute(
                 "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,scan_status,scan_result,sha256) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
                 (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, scan_status, scan_result[:500], archive_sha256),
@@ -660,6 +669,12 @@ async def submit_resource(
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
     except HTTPException as exc:
+        if archive_key:
+            s3_delete(archive_key)
+        if cover_key:
+            s3_delete(cover_key)
+        if exc.status_code == 507:
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="存储配额已满，请删除不需要的资源或联系管理员。")
         raise exc
     except (BotoCoreError, ClientError, RuntimeError) as exc:
         if archive_key:
