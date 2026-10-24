@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import zipfile
 import logging
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -189,12 +190,30 @@ def init_db():
 
 
 @app.on_event("startup")
+def ensure_s3_bucket(max_attempts: int = 30) -> None:
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            client = s3_client()
+            try:
+                client.head_bucket(Bucket=S3_BUCKET)
+            except ClientError:
+                client.create_bucket(Bucket=S3_BUCKET)
+            return
+        except (BotoCoreError, ClientError, RuntimeError) as exc:
+            last_error = exc
+            if attempt + 1 < max_attempts:
+                time.sleep(2)
+    raise RuntimeError(f"Object storage is not ready or credentials are invalid: {type(last_error).__name__}")
+
+
 def startup():
     if not SECRET_KEY:
         raise RuntimeError("Set SECRET_KEY in your deployment environment")
     if not DATABASE_URL:
         raise RuntimeError("Set DATABASE_URL in your deployment environment")
     init_db()
+    ensure_s3_bucket()
 
 
 def current_user(request: Request):
