@@ -823,8 +823,9 @@ def admin_page(request: Request, notice: str = ""):
         unscanned = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE COALESCE(r.scan_status,'pending') <> 'clean' ORDER BY r.created_at DESC LIMIT 100").fetchall()
         invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
         users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
+        audit_logs = conn.execute("SELECT a.*, u.username AS admin_name FROM admin_audit_log a LEFT JOIN users u ON u.id=a.admin_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
-    return page(request, "admin.html", user=user, stats=stats, pending=pending, unscanned=unscanned, invites=invites, users=users, notice=notice)
+    return page(request, "admin.html", user=user, stats=stats, pending=pending, unscanned=unscanned, invites=invites, users=users, audit_logs=audit_logs, notice=notice)
 
 
 @app.post("/admin/invites")
@@ -880,7 +881,7 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
 @app.post("/admin/resources/{resource_id}/rescan")
 def rescan_resource(request: Request, resource_id: int, csrf_token: str = Form(...)):
     validate_csrf(request, csrf_token)
-    require_admin(request)
+    admin = require_admin(request)
     with db_connect() as conn:
         resource = conn.execute("SELECT id, filename, status FROM resources WHERE id=%s", (resource_id,)).fetchone()
     if not resource:
