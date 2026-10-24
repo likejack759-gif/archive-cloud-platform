@@ -243,6 +243,8 @@ def test_password_reset_updates_hash_and_invalidates_sessions(monkeypatch):
             return self
         def fetchone(self):
             return {"id": 8, "username": "member"}
+        def commit(self):
+            return None
 
     conn = FakeConnection()
     monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
