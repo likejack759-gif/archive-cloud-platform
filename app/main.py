@@ -276,6 +276,8 @@ def record_login_attempt(username: str, ip_address: str, succeeded: bool) -> Non
     username_hash = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()
     ip_hash = hashlib.sha256(ip_address.encode("utf-8")).hexdigest()
     with db_connect() as conn:
+        if succeeded:
+            conn.execute("DELETE FROM login_attempts WHERE username_hash=%s AND ip_hash=%s AND succeeded=FALSE", (username_hash, ip_hash))
         conn.execute(
             "INSERT INTO login_attempts (username_hash, ip_hash, succeeded) VALUES (%s,%s,%s)",
             (username_hash, ip_hash, succeeded),
@@ -508,8 +510,8 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
     invite_digest = hashlib.sha256(invite_code.encode("utf-8")).hexdigest()
     if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
         return page(request, "register.html", error="用户名需为 3–32 位字母、数字、点、下划线或连字符。")
-    if len(password) < 10:
-        return page(request, "register.html", error="密码至少需要 10 个字符。")
+    if len(password) < 10 or len(password) > 128:
+        return page(request, "register.html", error="密码长度必须为 10–128 个字符。")
     try:
         with db_connect() as conn:
             invite_row = conn.execute(
@@ -533,6 +535,7 @@ def register(request: Request, username: str = Form(...), password: str = Form(.
             conn.commit()
     except IntegrityError:
         return page(request, "register.html", error="用户名已存在，请更换用户名。")
+    request.session.clear()
     request.session["user_id"] = user["id"]
     return RedirectResponse("/", status_code=303)
 
