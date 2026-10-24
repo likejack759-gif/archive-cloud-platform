@@ -152,6 +152,9 @@ def test_only_superadmin_can_demote_another_admin(monkeypatch):
         def fetchone(self):
             return {"username": "other-admin", "role": "admin"}
 
+        def commit(self):
+            return None
+
     monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
     monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
     request = SimpleNamespace(session={"csrf_token": "test"})
