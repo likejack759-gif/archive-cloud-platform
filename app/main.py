@@ -682,6 +682,41 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
     return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
 
 
+@app.post("/admin/resources/{resource_id}/rescan")
+def rescan_resource(request: Request, resource_id: int):
+    require_admin(request)
+    with db_connect() as conn:
+        resource = conn.execute("SELECT id, filename, status FROM resources WHERE id=%s", (resource_id,)).fetchone()
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource not found")
+    key = resource["filename"]
+    if not safe_object_key(key, "files/"):
+        raise HTTPException(status_code=404, detail="File not found")
+    fd, path = tempfile.mkstemp(prefix="archive-rescan-")
+    try:
+        with os.fdopen(fd, "wb") as target:
+            obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+            body = obj["Body"]
+            try:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    if chunk:
+                        target.write(chunk)
+            finally:
+                body.close()
+        scan_status, scan_result = clamav_scan(path)
+        with db_connect() as conn:
+            conn.execute("UPDATE resources SET scan_status=%s, scan_result=%s WHERE id=%s", (scan_status, scan_result[:500], resource_id))
+            if scan_status == "infected" and resource["status"] == "approved":
+                conn.execute("UPDATE resources SET status='pending', review_note=%s WHERE id=%s", ("已撤回：病毒扫描发现风险文件", resource_id))
+            conn.commit()
+        return RedirectResponse("/admin?notice=resource_rescanned", status_code=303)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 @app.post("/admin/users/{user_id}/role")
 def change_user_role(request: Request, user_id: int, role: str = Form(...)):
     admin = require_admin(request)
