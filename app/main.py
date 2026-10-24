@@ -840,6 +840,7 @@ def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(
             "INSERT INTO invites (code,created_by,is_active,label,max_uses,uses) VALUES (%s,%s,TRUE,%s,%s,0)",
             (code_digest, admin["id"], label, max_uses),
         )
+        write_admin_audit(conn, admin["id"], "invite.create", "invite", "new", f"label={label!r}; max_uses={max_uses}")
         conn.commit()
     request.session["new_invite"] = code
     return RedirectResponse("/admin?notice=invite_created", status_code=303)
@@ -848,9 +849,11 @@ def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(
 @app.post("/admin/invites/{invite_id}/toggle")
 def toggle_invite(request: Request, invite_id: int, csrf_token: str = Form(...)):
     validate_csrf(request, csrf_token)
-    require_admin(request)
+    admin = require_admin(request)
     with db_connect() as conn:
-        conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses", (invite_id,))
+        changed = conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses RETURNING is_active", (invite_id,)).fetchone()
+        if changed:
+            write_admin_audit(conn, admin["id"], "invite.toggle", "invite", invite_id, f"is_active={changed['is_active']}")
         conn.commit()
     return RedirectResponse("/admin?notice=invite_updated", status_code=303)
 
@@ -869,6 +872,7 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
             raise HTTPException(status_code=409, detail="Cannot approve: resource has not passed a clean antivirus scan")
         status = "approved" if action == "approve" else "rejected"
         conn.execute("UPDATE resources SET status=%s,review_note=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, review_note.strip()[:500], admin["id"], resource_id))
+        write_admin_audit(conn, admin["id"], f"resource.{status}", "resource", resource_id, f"note={review_note.strip()[:300]!r}")
         conn.commit()
     return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
 
@@ -900,6 +904,7 @@ def rescan_resource(request: Request, resource_id: int, csrf_token: str = Form(.
             conn.execute("UPDATE resources SET scan_status=%s, scan_result=%s WHERE id=%s", (scan_status, scan_result[:500], resource_id))
             if scan_status == "infected" and resource["status"] == "approved":
                 conn.execute("UPDATE resources SET status='pending', review_note=%s WHERE id=%s", ("已撤回：病毒扫描发现风险文件", resource_id))
+            write_admin_audit(conn, admin["id"], f"resource.rescan.{scan_status}", "resource", resource_id, scan_result[:300])
             conn.commit()
         return RedirectResponse("/admin?notice=resource_rescanned", status_code=303)
     finally:
@@ -918,7 +923,10 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
     if user_id == admin["id"] and role != "admin":
         raise HTTPException(status_code=400, detail="You cannot remove your own administrator role")
     with db_connect() as conn:
+        target = conn.execute("SELECT username FROM users WHERE id=%s", (user_id,)).fetchone()
         conn.execute("UPDATE users SET role=%s WHERE id=%s", (role, user_id))
+        if target:
+            write_admin_audit(conn, admin["id"], "user.role_change", "user", user_id, f"username={target['username']!r}; role={role}")
         conn.commit()
     return RedirectResponse("/admin?notice=user_role_updated", status_code=303)
 
