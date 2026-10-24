@@ -831,7 +831,7 @@ def admin_page(request: Request, notice: str = ""):
         pending = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
         unscanned = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE COALESCE(r.scan_status,'pending') <> 'clean' ORDER BY r.created_at DESC LIMIT 100").fetchall()
         invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
-        users = conn.execute("SELECT id,username,role,created_at,is_banned FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
+        users = conn.execute("SELECT id,username,role,created_at,is_banned,is_superadmin FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
         audit_logs = conn.execute("SELECT a.*, u.username AS admin_name FROM admin_audit_log a LEFT JOIN users u ON u.id=a.admin_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
     return page(request, "admin.html", user=user, stats=stats, pending=pending, unscanned=unscanned, invites=invites, users=users, audit_logs=audit_logs, notice=notice)
