@@ -29,6 +29,13 @@ def test_windows_zip_path_traversal_is_rejected(tmp_path):
     assert upload_security.inspect_zip_archive(str(path))[0] is False
 
 
+def test_windows_drive_path_is_rejected(tmp_path):
+    path = tmp_path / "bad-drive.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(r"C:\\Windows\\system.ini", "bad")
+    assert upload_security.inspect_zip_archive(str(path))[0] is False
+
+
 def test_symlink_zip_entry_is_rejected(tmp_path):
     path = tmp_path / "symlink.zip"
     with zipfile.ZipFile(path, "w") as archive:
