@@ -41,6 +41,7 @@ jobs:
           ADMIN_PASSWORD: ci-only-not-production
           DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
           ADMIN_USERNAME: ci-test-admin
+          PYTHONPATH: .
         run: |
           if find . -maxdepth 2 -type f \( -name 'test_*.py' -o -name '*_test.py' \) | grep -q .; then
             pytest -q
