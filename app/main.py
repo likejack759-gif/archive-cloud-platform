@@ -933,9 +933,11 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
     if user_id == admin["id"] and role != "admin":
         raise HTTPException(status_code=400, detail="You cannot remove your own administrator role")
     with db_connect() as conn:
-        target = conn.execute("SELECT username, role FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        target = conn.execute("SELECT username, role, is_superadmin FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
+        if target.get("is_superadmin", False) and role != "admin":
+            raise HTTPException(status_code=409, detail="A super administrator cannot be demoted through this action")
         if target["role"] == "admin" and role != "admin" and not admin.get("is_superadmin", False):
             raise HTTPException(status_code=403, detail="Only the super administrator can demote another administrator")
         conn.execute("UPDATE users SET role=%s, session_version=session_version+1 WHERE id=%s", (role, user_id))
@@ -953,9 +955,13 @@ def set_user_ban(request: Request, user_id: int, action: str = Form(...), csrf_t
     if user_id == admin["id"] and action == "ban":
         raise HTTPException(status_code=400, detail="You cannot ban your own account")
     with db_connect() as conn:
-        target = conn.execute("SELECT id, username, role, is_banned FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        target = conn.execute("SELECT id, username, role, is_banned, is_superadmin FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
+        if action == "ban" and target.get("is_superadmin", False) and not admin.get("is_superadmin", False):
+            raise HTTPException(status_code=403, detail="Only the super administrator can ban a super administrator")
+        if action == "ban" and target.get("is_superadmin", False):
+            raise HTTPException(status_code=409, detail="A super administrator account cannot be banned")
         if action == "ban" and target["role"] == "admin":
             active_admins = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND is_banned=FALSE").fetchone()["n"]
             if active_admins <= 1:
