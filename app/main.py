@@ -92,6 +92,8 @@ def init_db():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS invites (
                 id BIGSERIAL PRIMARY KEY,
@@ -234,7 +236,11 @@ def current_user(request: Request):
     if not uid:
         return None
     with db_connect() as conn:
-        return conn.execute("SELECT id, username, role, created_at FROM users WHERE id=%s", (uid,)).fetchone()
+        user = conn.execute("SELECT id, username, role, created_at, is_banned, session_version FROM users WHERE id=%s", (uid,)).fetchone()
+        if not user or user["is_banned"] or request.session.get("session_version") != user["session_version"]:
+            request.session.clear()
+            return None
+        return user
 
 
 def require_user(request: Request):
@@ -573,13 +579,14 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     if login_is_limited(normalized_username, ip_address):
         raise HTTPException(status_code=429, detail="登录尝试过多，请稍后再试。")
     with db_connect() as conn:
-        user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (normalized_username,)).fetchone()
-    if not user or not verify_password(password, user["password_hash"]):
+        user = conn.execute("SELECT id, password_hash, is_banned, session_version FROM users WHERE username=%s", (normalized_username,)).fetchone()
+    if not user or user["is_banned"] or not verify_password(password, user["password_hash"]):
         record_login_attempt(normalized_username, ip_address, False)
         return page(request, "login.html", error="用户名或密码不正确。")
     record_login_attempt(normalized_username, ip_address, True)
     request.session.clear()
     request.session["user_id"] = user["id"]
+    request.session["session_version"] = user["session_version"]
     return RedirectResponse("/", status_code=303)
 
 
@@ -822,7 +829,7 @@ def admin_page(request: Request, notice: str = ""):
         pending = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.created_at ASC").fetchall()
         unscanned = conn.execute("SELECT r.*, u.username AS owner_name FROM resources r JOIN users u ON u.id=r.user_id WHERE COALESCE(r.scan_status,'pending') <> 'clean' ORDER BY r.created_at DESC LIMIT 100").fetchall()
         invites = conn.execute("SELECT i.*, i.is_active AS active FROM invites i ORDER BY i.created_at DESC LIMIT 100").fetchall()
-        users = conn.execute("SELECT id,username,role,created_at FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
+        users = conn.execute("SELECT id,username,role,created_at,is_banned FROM users ORDER BY created_at DESC LIMIT 200").fetchall()
         audit_logs = conn.execute("SELECT a.*, u.username AS admin_name FROM admin_audit_log a LEFT JOIN users u ON u.id=a.admin_user_id ORDER BY a.created_at DESC LIMIT 50").fetchall()
     stats = dict(stats_row)
     return page(request, "admin.html", user=user, stats=stats, pending=pending, unscanned=unscanned, invites=invites, users=users, audit_logs=audit_logs, notice=notice)
@@ -924,12 +931,58 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
     if user_id == admin["id"] and role != "admin":
         raise HTTPException(status_code=400, detail="You cannot remove your own administrator role")
     with db_connect() as conn:
-        target = conn.execute("SELECT username FROM users WHERE id=%s", (user_id,)).fetchone()
-        conn.execute("UPDATE users SET role=%s WHERE id=%s", (role, user_id))
-        if target:
-            write_admin_audit(conn, admin["id"], "user.role_change", "user", user_id, f"username={target['username']!r}; role={role}")
+        target = conn.execute("SELECT username, role FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if target["role"] == "admin" and role != "admin":
+            admins = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND is_banned=FALSE").fetchone()["n"]
+            if admins <= 1:
+                raise HTTPException(status_code=409, detail="Cannot remove the last active administrator")
+        conn.execute("UPDATE users SET role=%s, session_version=session_version+1 WHERE id=%s", (role, user_id))
+        write_admin_audit(conn, admin["id"], "user.role_change", "user", user_id, f"username={target['username']!r}; role={role}")
         conn.commit()
     return RedirectResponse("/admin?notice=user_role_updated", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/ban")
+def set_user_ban(request: Request, user_id: int, action: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    admin = require_admin(request)
+    if action not in {"ban", "unban"}:
+        raise HTTPException(status_code=400, detail="Invalid account status action")
+    if user_id == admin["id"] and action == "ban":
+        raise HTTPException(status_code=400, detail="You cannot ban your own account")
+    with db_connect() as conn:
+        target = conn.execute("SELECT id, username, role, is_banned FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if action == "ban" and target["role"] == "admin":
+            active_admins = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND is_banned=FALSE").fetchone()["n"]
+            if active_admins <= 1:
+                raise HTTPException(status_code=409, detail="Cannot ban the last active administrator")
+        banned = action == "ban"
+        conn.execute("UPDATE users SET is_banned=%s, session_version=session_version+1 WHERE id=%s", (banned, user_id))
+        write_admin_audit(conn, admin["id"], "user.ban" if banned else "user.unban", "user", user_id, f"username={target['username']!r}")
+        conn.commit()
+    return RedirectResponse("/admin?notice=user_status_updated", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/reset-password")
+def reset_user_password(request: Request, user_id: int, new_password: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
+    admin = require_admin(request)
+    if len(new_password) < 10 or len(new_password) > 128:
+        raise HTTPException(status_code=400, detail="Password must be 10–128 characters")
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="Use the normal password-change process for your own account")
+    with db_connect() as conn:
+        target = conn.execute("SELECT id, username FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        conn.execute("UPDATE users SET password_hash=%s, session_version=session_version+1 WHERE id=%s", (hash_password(new_password), user_id))
+        write_admin_audit(conn, admin["id"], "user.password_reset", "user", user_id, f"username={target['username']!r}; existing sessions invalidated")
+        conn.commit()
+    return RedirectResponse("/admin?notice=password_reset", status_code=303)
 
 
 @app.get("/health")
