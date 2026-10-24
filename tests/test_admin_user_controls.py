@@ -167,3 +167,61 @@ def test_only_superadmin_can_demote_another_admin(monkeypatch):
     monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin", "is_superadmin": True})
     response = main.change_user_role(request, 8, role="user", csrf_token="test")
     assert response.status_code == 303
+
+
+def test_superadmin_cannot_be_demoted(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params):
+            return self
+
+        def fetchone(self):
+            return {"username": "chief", "role": "admin", "is_superadmin": True}
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin", "is_superadmin": True})
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    with pytest.raises(HTTPException) as exc:
+        main.change_user_role(request, 8, role="user", csrf_token="test")
+    assert exc.value.status_code == 409
+
+
+def test_superadmin_cannot_be_banned(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params):
+            return self
+
+        def fetchone(self):
+            return {"id": 8, "username": "chief", "role": "admin", "is_banned": False, "is_superadmin": True}
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin", "is_superadmin": True})
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    with pytest.raises(HTTPException) as exc:
+        main.set_user_ban(request, 8, action="ban", csrf_token="test")
+    assert exc.value.status_code == 409
