@@ -511,6 +511,15 @@ async def submit_resource(
         archive_path, archive_size = await save_upload_to_temp(archive, max_bytes)
         if not archive_is_valid(archive_path, archive_filename):
             return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="文件内容与扩展名不匹配，或文件格式无效。")
+        if Path(archive_filename).suffix.lower() in {".zip", ".apk"}:
+            archive_safe, archive_reason = inspect_zip_archive(archive_path)
+            if not archive_safe:
+                return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error="压缩包安全检查未通过：" + archive_reason)
+        scan_status, scan_result = clamav_scan(archive_path)
+        if scan_status != "clean":
+            message = "安全扫描检测到恶意文件，已拒绝上传。" if scan_status == "infected" else "病毒扫描服务暂不可用，文件未上传；请管理员检查 ClamAV 服务。"
+            logging.warning("Upload rejected by scanner status=%s result=%s", scan_status, scan_result[:300])
+            return page(request, "submit.html", user=user, max_upload_mb=MAX_UPLOAD_MB, error=message)
         archive_key = f"files/{secrets.token_hex(16)}_{archive_filename}"
         content_type = "application/vnd.android.package-archive" if archive_filename.lower().endswith(".apk") else "application/octet-stream"
         s3_put(archive_path, archive_key, content_type)
