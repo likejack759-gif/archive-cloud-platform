@@ -100,7 +100,7 @@ pre{max-width:100%;overflow:auto;border-radius:14px}
 {% if user %}
 <a href="/">资源首页</a><a href="/submit">提交资源</a><a href="/my-resources">个人中心</a>
 {% if user.role == 'admin' %}<a href="/admin">管理后台</a><a href="/admin/feedback">错误报告管理</a>{% endif %}
-<form class="inline" method="post" action="/logout"><button class="secondary" type="submit">退出登录</button></form>
+<form class="inline" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">退出登录</button></form>
 {% else %}<a href="/login">登录</a><a href="/register">邀请码注册</a>{% endif %}
 </nav></header>
 {% block content %}{% endblock %}
