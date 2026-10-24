@@ -938,6 +938,8 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
             raise HTTPException(status_code=404, detail="User not found")
         if target.get("is_superadmin", False) and role != "admin":
             raise HTTPException(status_code=409, detail="A super administrator cannot be demoted through this action")
+        if role == "admin" and target["role"] != "admin" and not admin.get("is_superadmin", False):
+            raise HTTPException(status_code=403, detail="Only the super administrator can promote users to administrator")
         if target["role"] == "admin" and role != "admin" and not admin.get("is_superadmin", False):
             raise HTTPException(status_code=403, detail="Only the super administrator can demote another administrator")
         conn.execute("UPDATE users SET role=%s, session_version=session_version+1 WHERE id=%s", (role, user_id))
@@ -982,9 +984,13 @@ def reset_user_password(request: Request, user_id: int, new_password: str = Form
     if user_id == admin["id"]:
         raise HTTPException(status_code=400, detail="Use the normal password-change process for your own account")
     with db_connect() as conn:
-        target = conn.execute("SELECT id, username FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        target = conn.execute("SELECT id, username, is_superadmin FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
+        if target.get("is_superadmin", False) and not admin.get("is_superadmin", False):
+            raise HTTPException(status_code=403, detail="Only the super administrator can reset a super administrator password")
+        if target.get("is_superadmin", False):
+            raise HTTPException(status_code=409, detail="A super administrator password cannot be reset through this action")
         conn.execute("UPDATE users SET password_hash=%s, session_version=session_version+1 WHERE id=%s", (hash_password(new_password), user_id))
         write_admin_audit(conn, admin["id"], "user.password_reset", "user", user_id, f"username={target['username']!r}; existing sessions invalidated")
         conn.commit()
