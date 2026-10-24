@@ -102,3 +102,32 @@ def test_current_user_invalidates_banned_or_stale_session(monkeypatch):
 
         assert main.current_user(request) is None
         assert session == {}
+
+
+def test_admin_cannot_demote_another_admin(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params):
+            return self
+
+        def fetchone(self):
+            return {"username": "other-admin", "role": "admin"}
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin"})
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    with pytest.raises(HTTPException) as exc:
+        main.change_user_role(request, 8, role="user", csrf_token="test")
+    assert exc.value.status_code == 403
