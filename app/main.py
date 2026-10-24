@@ -936,9 +936,7 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
         if target["role"] == "admin" and role != "admin":
-            admins = conn.execute("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND is_banned=FALSE").fetchone()["n"]
-            if admins <= 1:
-                raise HTTPException(status_code=409, detail="Cannot remove the last active administrator")
+            raise HTTPException(status_code=403, detail="Administrators cannot demote other administrators")
         conn.execute("UPDATE users SET role=%s, session_version=session_version+1 WHERE id=%s", (role, user_id))
         write_admin_audit(conn, admin["id"], "user.role_change", "user", user_id, f"username={target['username']!r}; role={role}")
         conn.commit()
