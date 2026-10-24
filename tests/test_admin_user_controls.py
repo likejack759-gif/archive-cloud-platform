@@ -433,3 +433,67 @@ def test_banning_user_invalidates_existing_sessions(monkeypatch):
     update = next((q, p) for q, p in conn.queries if "UPDATE users SET is_banned=%s" in q)
     assert update[1] == (True, 8)
     assert "session_version=session_version+1" in update[0]
+
+
+def test_resource_rejection_updates_status_audits_and_commits(monkeypatch):
+    from types import SimpleNamespace
+    import app.main as main
+
+    class FakeConnection:
+        def __init__(self):
+            self.queries = []
+            self.committed = False
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, query, params):
+            self.queries.append((query, params))
+            return self
+        def fetchone(self):
+            return {"scan_status": "clean"}
+        def commit(self):
+            self.committed = True
+
+    conn = FakeConnection()
+    audits = []
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin"})
+    monkeypatch.setattr(main, "db_connect", lambda: conn)
+    monkeypatch.setattr(main, "write_admin_audit", lambda *args, **kwargs: audits.append((args, kwargs)))
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    response = main.review_resource(request, 12, action="reject", review_note="unsafe file", csrf_token="test")
+
+    assert response.status_code == 303
+    update = next((query, params) for query, params in conn.queries if "UPDATE resources SET status=%s" in query)
+    assert update[1] == ("rejected", "unsafe file", 7, 12)
+    assert conn.committed
+    assert audits and audits[0][0][2] == "resource.rejected"
+
+
+def test_resource_review_returns_404_when_resource_is_not_pending(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, query, params):
+            return self
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin"})
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    with pytest.raises(HTTPException) as exc:
+        main.review_resource(request, 999, action="reject", review_note="", csrf_token="test")
+    assert exc.value.status_code == 404
+
