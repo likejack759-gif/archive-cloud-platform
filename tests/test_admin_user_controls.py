@@ -367,3 +367,36 @@ def test_regular_admin_cannot_reset_superadmin_password(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         main.reset_user_password(request, 8, new_password="New-Secure-Password-123", csrf_token="test")
     assert exc.value.status_code == 403
+
+
+def test_unban_restores_account_and_invalidates_old_sessions(monkeypatch):
+    from types import SimpleNamespace
+    import app.main as main
+
+    class FakeConnection:
+        def __init__(self):
+            self.queries = []
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, query, params):
+            self.queries.append((query, params))
+            return self
+        def fetchone(self):
+            return {"id": 8, "username": "member", "role": "user", "is_banned": True, "is_superadmin": False}
+        def commit(self):
+            return None
+
+    conn = FakeConnection()
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin", "is_superadmin": True})
+    monkeypatch.setattr(main, "db_connect", lambda: conn)
+    monkeypatch.setattr(main, "write_admin_audit", lambda *args, **kwargs: None)
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    response = main.set_user_ban(request, 8, action="unban", csrf_token="test")
+    assert response.status_code == 303
+    update = next((q, p) for q, p in conn.queries if "UPDATE users SET is_banned=%s" in q)
+    assert update[1] == (False, 8)
+    assert "session_version=session_version+1" in update[0]
