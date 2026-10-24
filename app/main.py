@@ -14,7 +14,8 @@ import psycopg
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, PlainTextResponse, JSONResponse, FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
@@ -726,6 +727,52 @@ def cover_file(request: Request, filename: str):
     return stream_s3_object(filename, Path(filename).name, mime)
 
 
+def _remove_temp_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def verified_download_response(resource, key: str, filename: str):
+    expected = (resource.get("sha256") or "").strip().lower()
+    if not expected:
+        # Legacy resources have no recorded digest; scanning still gates access.
+        try:
+            obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+        except ClientError:
+            raise HTTPException(status_code=502, detail="Unable to retrieve file")
+        body = obj["Body"]
+        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+        return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type="application/octet-stream", headers=headers)
+
+    fd, path = tempfile.mkstemp(prefix="archive-download-")
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(fd, "wb") as output:
+            try:
+                obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
+            except ClientError:
+                raise HTTPException(status_code=502, detail="Unable to retrieve file")
+            body = obj["Body"]
+            try:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    if chunk:
+                        digest.update(chunk)
+                        output.write(chunk)
+            finally:
+                body.close()
+        if not secrets.compare_digest(digest.hexdigest(), expected):
+            with db_connect() as conn:
+                conn.execute("UPDATE resources SET scan_status='error', scan_result='SHA-256 integrity mismatch' WHERE id=%s", (resource["id"],))
+                conn.commit()
+            raise HTTPException(status_code=502, detail="File integrity verification failed; administrator has been notified")
+        return FileResponse(path, media_type="application/octet-stream", filename=filename, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}, background=BackgroundTask(_remove_temp_file, path))
+    except Exception:
+        _remove_temp_file(path)
+        raise
+
+
 @app.get("/download/{resource_id}")
 def download_resource(request: Request, resource_id: int):
     user = current_user(request)
@@ -740,18 +787,8 @@ def download_resource(request: Request, resource_id: int):
     key = resource["filename"]
     if not safe_object_key(key, "files/"):
         raise HTTPException(status_code=404, detail="File not found")
-    try:
-        obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
-    except ClientError:
-        raise HTTPException(status_code=502, detail="Unable to retrieve file")
-    body = obj["Body"]
     filename = safe_name(resource["original_filename"] or Path(key).name)
-    headers = {
-        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
-        "Cache-Control": "private, no-store",
-        "X-Content-Type-Options": "nosniff",
-    }
-    return StreamingResponse(body.iter_chunks(chunk_size=1024 * 1024), media_type="application/octet-stream", headers=headers)
+    return verified_download_response(resource, key, filename)
 
 
 @app.get("/admin", response_class=HTMLResponse)
