@@ -315,3 +315,55 @@ def test_resource_approval_allowed_after_clean_scan(monkeypatch):
     response = main.review_resource(request, 12, action="approve", review_note="checked", csrf_token="test")
     assert response.status_code == 303
     assert any("UPDATE resources SET status=%s" in q for q, _ in conn.queries)
+
+
+def test_regular_admin_cannot_promote_user_to_admin(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, query, params):
+            return self
+        def fetchone(self):
+            return {"username": "member", "role": "user", "is_superadmin": False}
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin", "is_superadmin": False})
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    with pytest.raises(HTTPException) as exc:
+        main.change_user_role(request, 8, role="admin", csrf_token="test")
+    assert exc.value.status_code == 403
+
+
+def test_regular_admin_cannot_reset_superadmin_password(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def execute(self, query, params):
+            return self
+        def fetchone(self):
+            return {"id": 8, "username": "chief", "is_superadmin": True}
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin", "is_superadmin": False})
+    monkeypatch.setattr(main, "db_connect", lambda: FakeConnection())
+    request = SimpleNamespace(session={"csrf_token": "test"})
+
+    with pytest.raises(HTTPException) as exc:
+        main.reset_user_password(request, 8, new_password="New-Secure-Password-123", csrf_token="test")
+    assert exc.value.status_code == 403
