@@ -17,7 +17,7 @@ def clamav_scan(path):
     try:
         with socket.create_connection((CLAMAV_HOST, CLAMAV_PORT), timeout=CLAMAV_TIMEOUT_SECONDS) as sock:
             sock.settimeout(CLAMAV_TIMEOUT_SECONDS)
-            sock.sendall(b"zINSTREAM\\0")
+            sock.sendall(b"zINSTREAM" + bytes([0]))
             with open(path, "rb") as source:
                 while True:
                     chunk = source.read(1024 * 1024)
@@ -31,9 +31,9 @@ def clamav_scan(path):
                 if not chunk:
                     break
                 response.extend(chunk)
-                if b"\\0" in chunk or b"\\n" in chunk:
+                if bytes([0]) in chunk or bytes([10]) in chunk:
                     break
-        result = bytes(response).decode("utf-8", "replace").strip().strip("\\0")
+        result = bytes(response).decode("utf-8", "replace").strip().strip(chr(0))
         if result.endswith("OK"):
             return "clean", result
         if "FOUND" in result:
@@ -50,7 +50,7 @@ def inspect_zip_archive(path):
                 return False, "Too many entries"
             total = 0
             for info in infos:
-                parts = PurePosixPath(info.filename.replace("\\\\", "/"))
+                parts = PurePosixPath(info.filename.replace(chr(92), "/"))
                 mode = (info.external_attr >> 16) & 0o170000
                 if parts.is_absolute() or ".." in parts.parts or mode == 0o120000 or info.flag_bits & 1:
                     return False, "Unsafe archive entry"
@@ -64,4 +64,4 @@ def inspect_zip_archive(path):
         return False, "Invalid ZIP/APK"
 
 def safe_object_key(key, prefix="files/"):
-    return bool(key and key.startswith(prefix) and "\\\\" not in key and all(p not in {"", ".", ".."} for p in key.split("/")))
+    return bool(key and key.startswith(prefix) and chr(92) not in key and all(p not in {"", ".", ".."} for p in key.split("/")))
