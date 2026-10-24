@@ -94,6 +94,7 @@ def init_db():
         """)
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN NOT NULL DEFAULT FALSE")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS invites (
                 id BIGSERIAL PRIMARY KEY,
@@ -197,7 +198,7 @@ def init_db():
                 )
             else:
                 conn.execute(
-                    "UPDATE users SET password_hash=%s, role='admin' WHERE id=%s",
+                    "UPDATE users SET password_hash=%s, role='admin', is_superadmin=TRUE WHERE id=%s",
                     (new_password_hash, row["id"])
                 )
         conn.commit()
@@ -236,7 +237,7 @@ def current_user(request: Request):
     if not uid:
         return None
     with db_connect() as conn:
-        user = conn.execute("SELECT id, username, role, created_at, is_banned, session_version FROM users WHERE id=%s", (uid,)).fetchone()
+        user = conn.execute("SELECT id, username, role, created_at, is_banned, session_version, is_superadmin FROM users WHERE id=%s", (uid,)).fetchone()
         if not user or user["is_banned"] or request.session.get("session_version") != user["session_version"]:
             request.session.clear()
             return None
@@ -935,8 +936,8 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
         target = conn.execute("SELECT username, role FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
         if not target:
             raise HTTPException(status_code=404, detail="User not found")
-        if target["role"] == "admin" and role != "admin":
-            raise HTTPException(status_code=403, detail="Administrators cannot demote other administrators")
+        if target["role"] == "admin" and role != "admin" and not admin.get("is_superadmin", False):
+            raise HTTPException(status_code=403, detail="Only the super administrator can demote another administrator")
         conn.execute("UPDATE users SET role=%s, session_version=session_version+1 WHERE id=%s", (role, user_id))
         write_admin_audit(conn, admin["id"], "user.role_change", "user", user_id, f"username={target['username']!r}; role={role}")
         conn.commit()
