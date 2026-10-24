@@ -35,6 +35,12 @@ jobs:
               env.get_template(template.name)
           print(f"Parsed {len(templates)} templates")
           PY
+      - name: Validate Compose configuration
+        run: |
+          cp .env.example .env
+          cp seaweedfs-s3.json.example seaweedfs-s3.json
+          docker compose config -q
+          rm -f .env seaweedfs-s3.json
       - name: Run tests when present
         env:
           SECRET_KEY: ci-only-not-production
