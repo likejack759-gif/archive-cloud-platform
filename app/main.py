@@ -192,8 +192,8 @@ def init_db():
 
             if row is None:
                 conn.execute(
-                    "INSERT INTO users (username,password_hash,role) "
-                    "VALUES (%s,%s,'admin')",
+                    "INSERT INTO users (username,password_hash,role,is_superadmin) "
+                    "VALUES (%s,%s,'admin',TRUE)",
                     (ADMIN_USERNAME, new_password_hash)
                 )
             else:
