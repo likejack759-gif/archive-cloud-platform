@@ -541,8 +541,8 @@ async def submit_resource(
             s3_put(cover_path, cover_key, mime)
         with db_connect() as conn:
             conn.execute(
-                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s)",
-                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size),
+                "INSERT INTO resources (user_id,resource_type,name,description,filename,original_filename,cover_filename,status,size_bytes,scan_status,scan_result) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s)",
+                (user["id"], resource_type[:40], name, description.strip()[:2000], archive_key, archive_filename, cover_key, archive_size, scan_status, scan_result[:500]),
             )
             conn.commit()
         return RedirectResponse("/my-resources?notice=submitted", status_code=303)
@@ -602,12 +602,12 @@ def download_resource(request: Request, resource_id: int):
         return RedirectResponse("/login", status_code=303)
     with db_connect() as conn:
         resource = conn.execute("SELECT * FROM resources WHERE id=%s", (resource_id,)).fetchone()
-        if not resource or resource["status"] != "approved":
+        if not resource or resource["status"] != "approved" or resource.get("scan_status", "pending") != "clean":
             raise HTTPException(status_code=404, detail="Resource not found")
         conn.execute("UPDATE resources SET downloads=downloads+1 WHERE id=%s", (resource_id,))
         conn.commit()
     key = resource["filename"]
-    if not key.startswith("files/") or ".." in key:
+    if not safe_object_key(key, "files/"):
         raise HTTPException(status_code=404, detail="File not found")
     try:
         obj = s3_client().get_object(Bucket=S3_BUCKET, Key=key)
@@ -670,8 +670,13 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
     admin = require_admin(request)
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="Invalid review action")
-    status = "approved" if action == "approve" else "rejected"
     with db_connect() as conn:
+        resource = conn.execute("SELECT scan_status FROM resources WHERE id=%s AND status='pending' FOR UPDATE", (resource_id,)).fetchone()
+        if not resource:
+            raise HTTPException(status_code=404, detail="Pending resource not found")
+        if action == "approve" and resource["scan_status"] != "clean":
+            raise HTTPException(status_code=409, detail="Cannot approve: resource has not passed a clean antivirus scan")
+        status = "approved" if action == "approve" else "rejected"
         conn.execute("UPDATE resources SET status=%s,review_note=%s,reviewed_at=NOW(),reviewed_by=%s WHERE id=%s AND status='pending'", (status, review_note.strip()[:500], admin["id"], resource_id))
         conn.commit()
     return RedirectResponse("/admin?notice=resource_reviewed", status_code=303)
