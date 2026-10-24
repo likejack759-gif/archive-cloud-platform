@@ -1,5 +1,8 @@
 .env
+seaweedfs-s3.json
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.coverage
 data/*
 !data/.keep
