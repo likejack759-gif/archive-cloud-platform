@@ -123,6 +123,18 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log (created_at DESC)")
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS login_attempts (
                 id BIGSERIAL PRIMARY KEY,
                 username_hash TEXT NOT NULL,
@@ -285,6 +297,13 @@ def record_login_attempt(username: str, ip_address: str, succeeded: bool) -> Non
         )
         conn.execute("DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '7 days'")
         conn.commit()
+
+
+def write_admin_audit(conn, admin_user_id: int, action: str, target_type: str, target_id: str = "", details: str = "") -> None:
+    conn.execute(
+        "INSERT INTO admin_audit_log (admin_user_id, action, target_type, target_id, details) VALUES (%s,%s,%s,%s,%s)",
+        (admin_user_id, action[:80], target_type[:80], str(target_id)[:120], details[:500]),
+    )
 
 
 def page(request: Request, template: str, **context):
