@@ -263,7 +263,8 @@ def feedback_page(request: Request, sent: str = ""):
 
 
 @app.post("/feedback")
-def submit_feedback(request: Request, title: str = Form(...), description: str = Form(...), steps: str = Form(""), error_log: str = Form(""), reporter: str = Form(""), page_url: str = Form("")):
+def submit_feedback(request: Request, title: str = Form(...), description: str = Form(...), steps: str = Form(""), error_log: str = Form(""), reporter: str = Form(""), page_url: str = Form(""), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     title = title.strip()[:180]
     description = description.strip()[:5000]
     steps = steps.strip()[:5000]
@@ -303,7 +304,8 @@ def admin_feedback_page(request: Request):
 
 
 @app.post("/admin/feedback/{report_id}/status")
-def update_feedback_status(request: Request, report_id: int, status: str = Form(...)):
+def update_feedback_status(request: Request, report_id: int, status: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     require_admin(request)
     if status not in {"new","investigating","resolved","ignored"}:
         raise HTTPException(status_code=400, detail="Invalid report status")
@@ -474,7 +476,8 @@ def login_page(request: Request):
 
 
 @app.post("/login")
-def login(request: Request, username: str = Form(...), password: str = Form(...)):
+def login(request: Request, username: str = Form(...), password: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     with db_connect() as conn:
         user = conn.execute("SELECT id, password_hash FROM users WHERE username=%s", (username.strip(),)).fetchone()
     if not user or not verify_password(password, user["password_hash"]):
@@ -485,7 +488,8 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
 
 
 @app.post("/logout")
-def logout(request: Request):
+def logout(request: Request, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     request.session.clear()
     return RedirectResponse("/", status_code=303)
 
