@@ -203,9 +203,24 @@ def require_admin(request: Request):
     return user
 
 
+def get_csrf_token(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+def validate_csrf(request: Request, submitted_token: str) -> None:
+    expected = request.session.get("csrf_token", "")
+    if not expected or not secrets.compare_digest(str(expected), str(submitted_token or "")):
+        raise HTTPException(status_code=403, detail="Security token invalid or expired. Refresh the page and try again.")
+
+
 def page(request: Request, template: str, **context):
     if not context.get("user"):
         context["user"] = current_user(request)
+    context["csrf_token"] = get_csrf_token(request)
     return templates.TemplateResponse(request=request, name=template, context=context)
 
 
