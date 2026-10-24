@@ -3,6 +3,11 @@ import zipfile
 from app import upload_security
 
 
+def test_scanner_ping_fails_closed_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(upload_security, "CLAMAV_HOST", "")
+    assert upload_security.clamav_ping() is False
+
+
 def test_scanner_fails_closed_when_unconfigured(monkeypatch, tmp_path):
     path = tmp_path / "sample.zip"
     path.write_bytes(b"sample")
