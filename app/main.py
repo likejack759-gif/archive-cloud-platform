@@ -21,7 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 from psycopg.rows import dict_row
 from psycopg.errors import IntegrityError
-from app.upload_security import clamav_scan, inspect_zip_archive, safe_object_key
+from app.upload_security import clamav_ping, clamav_scan, inspect_zip_archive, safe_object_key
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -906,14 +906,21 @@ def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf
 
 @app.get("/health")
 def health():
-    result = {"status": "ok", "database": "unknown", "storage": "configured" if all([S3_ENDPOINT, os.getenv("AWS_ACCESS_KEY_ID"), os.getenv("AWS_SECRET_ACCESS_KEY"), S3_BUCKET]) else "missing_config"}
+    result = {"status": "ok", "database": "error", "storage": "error", "scanner": "error"}
     try:
         with db_connect() as conn:
             conn.execute("SELECT 1")
         result["database"] = "ok"
     except Exception:
+        pass
+    try:
+        s3_client().head_bucket(Bucket=S3_BUCKET)
+        result["storage"] = "ok"
+    except Exception:
+        pass
+    result["scanner"] = "ok" if clamav_ping() else "unavailable"
+    if any(result[name] != "ok" for name in ("database", "storage", "scanner")):
         result["status"] = "degraded"
-        result["database"] = "error"
     return JSONResponse(result, status_code=200 if result["status"] == "ok" else 503)
 
 
