@@ -11,6 +11,26 @@ CLAMAV_TIMEOUT_SECONDS = float(os.getenv("CLAMAV_TIMEOUT_SECONDS", "60"))
 MAX_ARCHIVE_MEMBERS = int(os.getenv("MAX_ARCHIVE_MEMBERS", "20000"))
 MAX_ARCHIVE_MEMBER_BYTES = int(os.getenv("MAX_ARCHIVE_MEMBER_BYTES", str(2 * 1024**3)))
 
+def clamav_ping():
+    if not CLAMAV_HOST:
+        return False
+    try:
+        with socket.create_connection((CLAMAV_HOST, CLAMAV_PORT), timeout=min(CLAMAV_TIMEOUT_SECONDS, 3)) as sock:
+            sock.settimeout(min(CLAMAV_TIMEOUT_SECONDS, 3))
+            sock.sendall(b"zPING" + bytes([0]))
+            response = bytearray()
+            while len(response) < 64:
+                chunk = sock.recv(64)
+                if not chunk:
+                    break
+                response.extend(chunk)
+                if bytes([0]) in chunk or bytes([10]) in chunk:
+                    break
+        return bytes(response).decode("utf-8", "replace").strip().strip(chr(0)) == "PONG"
+    except (OSError, TimeoutError, ValueError):
+        return False
+
+
 def clamav_scan(path):
     if not CLAMAV_HOST:
         return "unavailable", "ClamAV is not configured"
