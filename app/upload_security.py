@@ -72,7 +72,8 @@ def inspect_zip_archive(path):
             for info in infos:
                 parts = PurePosixPath(info.filename.replace(chr(92), "/"))
                 mode = (info.external_attr >> 16) & 0o170000
-                if parts.is_absolute() or ".." in parts.parts or mode == 0o120000 or info.flag_bits & 1:
+                has_windows_drive = bool(parts.parts and len(parts.parts[0]) >= 2 and parts.parts[0][1] == ":")
+                if parts.is_absolute() or has_windows_drive or ".." in parts.parts or mode == 0o120000 or info.flag_bits & 1:
                     return False, "Unsafe archive entry"
                 if info.file_size < 0 or info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
                     return False, "Entry too large"
