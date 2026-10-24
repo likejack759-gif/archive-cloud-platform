@@ -30,3 +30,45 @@ def test_admin_template_contains_controls():
     assert 'action="/admin/users/{{ u.id }}/ban"' in template
     assert 'action="/admin/users/{{ u.id }}/reset-password"' in template
     assert 'name="csrf_token"' in template
+
+def test_admin_cannot_ban_own_account(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin"})
+    request = SimpleNamespace(session={"csrf_token": "test"})
+    with pytest.raises(HTTPException) as exc:
+        main.set_user_ban(request, 7, action="ban", csrf_token="test")
+    assert exc.value.status_code == 400
+
+
+def test_admin_cannot_reset_own_password(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin"})
+    request = SimpleNamespace(session={"csrf_token": "test"})
+    with pytest.raises(HTTPException) as exc:
+        main.reset_user_password(request, 7, new_password="New-Secure-Password-123", csrf_token="test")
+    assert exc.value.status_code == 400
+
+
+def test_password_reset_rejects_short_password(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    import pytest
+    import app.main as main
+
+    monkeypatch.setattr(main, "validate_csrf", lambda request, token: None)
+    monkeypatch.setattr(main, "require_admin", lambda request: {"id": 7, "role": "admin"})
+    request = SimpleNamespace(session={"csrf_token": "test"})
+    with pytest.raises(HTTPException) as exc:
+        main.reset_user_password(request, 8, new_password="short", csrf_token="test")
+    assert exc.value.status_code == 400
+
