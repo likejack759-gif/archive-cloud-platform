@@ -432,7 +432,8 @@ def register_page(request: Request):
 
 
 @app.post("/register")
-def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...)):
+def register(request: Request, username: str = Form(...), password: str = Form(...), invite: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     username = username.strip()
     invite_code = invite.strip()
     invite_digest = hashlib.sha256(invite_code.encode("utf-8")).hexdigest()
@@ -505,7 +506,9 @@ async def submit_resource(
     description: str = Form(""),
     archive: UploadFile = File(...),
     cover: UploadFile | None = File(None),
+    csrf_token: str = Form(...),
 ):
+    validate_csrf(request, csrf_token)
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
@@ -655,7 +658,8 @@ def admin_page(request: Request, notice: str = ""):
 
 
 @app.post("/admin/invites")
-def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1)):
+def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(1), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     max_uses = max(1, min(int(max_uses), 1000))
     label = label.strip()[:100]
@@ -672,7 +676,8 @@ def create_invite(request: Request, label: str = Form(""), max_uses: int = Form(
 
 
 @app.post("/admin/invites/{invite_id}/toggle")
-def toggle_invite(request: Request, invite_id: int):
+def toggle_invite(request: Request, invite_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     require_admin(request)
     with db_connect() as conn:
         conn.execute("UPDATE invites SET is_active=NOT is_active WHERE id=%s AND uses < max_uses", (invite_id,))
@@ -681,7 +686,8 @@ def toggle_invite(request: Request, invite_id: int):
 
 
 @app.post("/admin/resources/{resource_id}/review")
-def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form("")):
+def review_resource(request: Request, resource_id: int, action: str = Form(...), review_note: str = Form(""), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="Invalid review action")
@@ -698,7 +704,8 @@ def review_resource(request: Request, resource_id: int, action: str = Form(...),
 
 
 @app.post("/admin/resources/{resource_id}/rescan")
-def rescan_resource(request: Request, resource_id: int):
+def rescan_resource(request: Request, resource_id: int, csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     require_admin(request)
     with db_connect() as conn:
         resource = conn.execute("SELECT id, filename, status FROM resources WHERE id=%s", (resource_id,)).fetchone()
@@ -733,7 +740,8 @@ def rescan_resource(request: Request, resource_id: int):
 
 
 @app.post("/admin/users/{user_id}/role")
-def change_user_role(request: Request, user_id: int, role: str = Form(...)):
+def change_user_role(request: Request, user_id: int, role: str = Form(...), csrf_token: str = Form(...)):
+    validate_csrf(request, csrf_token)
     admin = require_admin(request)
     if role not in {"user", "admin"}:
         raise HTTPException(status_code=400, detail="Invalid role")
