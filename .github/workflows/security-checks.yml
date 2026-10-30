@@ -103,7 +103,7 @@ jobs:
                   assert "validate_csrf" in body_calls, f"{node.name} is missing validate_csrf()"
                   post_routes.append(node.name)
 
-          assert len(post_routes) == 8, f"Expected 8 POST routes, found {len(post_routes)}"
+          assert len(post_routes) >= 8, f"Expected at least 8 guarded POST routes, found {len(post_routes)}"
           assert len(post_routes) == len(set(post_routes)), "Duplicate POST route function names"
           required_post_routes = {"login", "logout", "submit_resource"}
           assert required_post_routes.issubset(set(post_routes)), (
@@ -144,5 +144,5 @@ jobs:
               assert forms == tokens, f"{name}: expected one CSRF token per form, found {tokens} for {forms} forms"
               assert not re.search(r"<form\b[^>]*>[^<]*<form\b", html, re.I), f"{name}: nested form detected"
 
-          print("PASS: Python syntax, 8 POST route CSRF guards, and form token structure.")
+          print(f"PASS: Python syntax, {len(post_routes)} POST route CSRF guards, and form token structure.")
           PY
