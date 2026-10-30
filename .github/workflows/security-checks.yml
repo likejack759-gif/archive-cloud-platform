@@ -11,6 +11,7 @@ on:
       - ui/original-deep-space
       - feature/platform-storage-quota
       - feature/upload-security-review
+      - recovery/**
 
 permissions:
   contents: read
