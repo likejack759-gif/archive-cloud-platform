@@ -1,5 +1,27 @@
 {% extends "base.html" %}{% block title %}资源广场 · 云端资源库{% endblock %}{% block content %}
 <style>
+/* Homepage-specific celestial archive presentation */
+.hero:after{
+  content:"龍";
+  font-family:"Noto Serif CJK SC","Songti SC",serif;
+  font-weight:900;
+  font-size:clamp(150px,24vw,290px);
+  line-height:1;
+  right:5%;
+  bottom:-8%;
+  color:transparent;
+  background:linear-gradient(145deg,rgba(246,218,153,.22),rgba(111,208,255,.12),rgba(188,157,255,.16));
+  -webkit-background-clip:text;
+  background-clip:text;
+  text-shadow:0 0 55px rgba(106,183,237,.08);
+}
+.hero .page-kicker{letter-spacing:3px;color:#e4c77f}
+.hero h1{max-width:800px}
+.hero-actions .btn{min-height:46px;padding-inline:20px}
+.resource .tag{margin-bottom:4px}
+.resource .btn{box-shadow:0 7px 22px rgba(75,164,220,.18)}
+.resource .btn:hover{box-shadow:0 9px 30px rgba(75,164,220,.3),0 0 22px rgba(231,199,122,.12)}
+@media(max-width:640px){.hero:after{right:-4%;bottom:-3%;font-size:170px;opacity:.75}}
 .community-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 26px}
 .community-stat{padding:17px 18px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}
 .community-stat strong{display:block;font-size:clamp(22px,3vw,30px);line-height:1.25;letter-spacing:-.7px}
@@ -18,9 +40,9 @@
 </style>
 <section class="hero">
   <div class="hero-content">
-    <div class="page-kicker">✦ CLOUD RESOURCE COMMUNITY</div>
-    <h1>发现值得收藏的资源，<br><span class="hero-title-accent">让分享连接每一次灵感。</span></h1>
-    <p class="hero-lead">探索精选资源、发现创作灵感并分享作品。这里汇集经过审核的压缩包、安卓应用和数字资源，让你在手机上也能轻松浏览与下载。</p>
+    <div class="page-kicker">✦ CELESTIAL DRAGON · RESOURCE ARCHIVE</div>
+    <h1>探索星海珍藏，<br><span class="hero-title-accent">让每一份资源都闪耀。</span></h1>
+    <p class="hero-lead">穿越星云，发现值得收藏的数字资源。这里汇集经过审核的压缩包、安卓应用与社区分享，让探索、投稿和下载在每一块屏幕上都清晰流畅。</p>
     <div class="hero-actions">
       {% if user %}<a class="btn" href="/submit">＋ 发布资源</a><a class="btn secondary" href="/my-resources">我的投稿 →</a>
       {% else %}<a class="btn" href="/login">登录资源广场 →</a><a class="btn secondary" href="/register">邀请码注册</a>{% endif %}
