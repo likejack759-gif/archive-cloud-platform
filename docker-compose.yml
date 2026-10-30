@@ -3,17 +3,26 @@ services:
     build: .
     container_name: cloud-resource-platform
     restart: unless-stopped
+    init: true
     ports:
       - "127.0.0.1:8000:8000"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for PostgreSQL}
+      AWS_ENDPOINT_URL_S3: ${AWS_ENDPOINT_URL_S3:?Set S3-compatible storage endpoint}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-archive-files}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
       SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
-      DATA_DIR: /data
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-127.0.0.1,::1}
       REQUEST_RATE_LIMIT: ${REQUEST_RATE_LIMIT:-120}
       REQUEST_RATE_WINDOW_SECONDS: ${REQUEST_RATE_WINDOW_SECONDS:-60}
+      CLAMAV_HOST: ${CLAMAV_HOST:-}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+      CLAMAV_TIMEOUT_SECONDS: ${CLAMAV_TIMEOUT_SECONDS:-30}
     volumes:
       - ./data:/data
