@@ -720,7 +720,7 @@ def compress_if_smaller(path: str) -> tuple[str, str, int]:
         fd, compressed_path = tempfile.mkstemp(prefix="archive-store-", suffix=".zst")
         os.close(fd)
         with open(path, "rb") as source, open(compressed_path, "wb") as target:
-            zstd.ZstdCompressor(level=3, threads=0).copy_stream(source, target)
+            zstd.ZstdCompressor(level=3, threads=0, write_content_size=True).copy_stream(source, target, size=original_size)
         original_size = os.path.getsize(path)
         compressed_size = os.path.getsize(compressed_path)
         if compressed_size <= int(original_size * 0.99):
