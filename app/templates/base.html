@@ -115,3 +115,216 @@ img{max-width:100%}
 {% block content %}{% endblock %}
 <div class="footer">云端资源库 · 资源经审核后开放 · 请勿上传违法或侵权文件</div>
 </div></body></html>
+
+
+/* =========================================================
+   STARFALL / CELESTIAL DRAGON THEME — shared by every page
+   No external assets or runtime dependencies.
+========================================================= */
+:root{
+  color-scheme:dark;
+  --bg:#070b18;
+  --panel:rgba(15,23,43,.78);
+  --panel-soft:rgba(25,37,65,.82);
+  --line:rgba(133,166,224,.22);
+  --text:#edf4ff;
+  --muted:#9aaaca;
+  --accent:#77d8ff;
+  --accent-strong:#9de6ff;
+  --accent-soft:rgba(79,164,222,.14);
+  --gold:#e8c77d;
+  --gold-bright:#fff0bd;
+  --good:#63d6ad;
+  --bad:#ff8297;
+  --shadow:0 18px 55px rgba(0,0,0,.34);
+  --radius:20px;
+}
+html{background:var(--bg)}
+body{
+  background:
+    radial-gradient(ellipse at 12% 8%,rgba(33,105,170,.22),transparent 34%),
+    radial-gradient(ellipse at 88% 18%,rgba(107,62,160,.2),transparent 36%),
+    radial-gradient(ellipse at 52% 100%,rgba(24,94,132,.16),transparent 42%),
+    var(--bg);
+  color:var(--text);
+}
+body:after{
+  content:"";
+  position:fixed;
+  inset:0;
+  z-index:0;
+  pointer-events:none;
+  opacity:.22;
+  background-image:
+    radial-gradient(1px 1px at 7% 23%,#fff 98%,transparent),
+    radial-gradient(1.5px 1.5px at 31% 77%,#9fe5ff 98%,transparent),
+    radial-gradient(1px 1px at 68% 14%,#fff 98%,transparent),
+    radial-gradient(1px 1px at 89% 68%,#d8c4ff 98%,transparent),
+    radial-gradient(1px 1px at 53% 48%,#fff 98%,transparent);
+  background-size:310px 290px,390px 350px,440px 400px,520px 470px,610px 560px;
+}
+.wrap{width:min(1280px,100%);padding:18px 24px 26px}
+header{
+  position:sticky;
+  top:10px;
+  z-index:50;
+  padding:12px 16px;
+  margin:0 0 25px;
+  border:1px solid rgba(135,174,231,.2);
+  border-radius:18px;
+  background:rgba(8,14,29,.78);
+  box-shadow:0 12px 38px rgba(0,0,0,.25),inset 0 1px rgba(255,255,255,.04);
+  backdrop-filter:blur(22px);
+  -webkit-backdrop-filter:blur(22px);
+}
+.brand{color:var(--text);letter-spacing:.5px}
+.logo{
+  color:#091322;
+  background:linear-gradient(140deg,#fff0bd 0%,#d9b45e 42%,#76d8ff 100%);
+  box-shadow:0 0 0 1px rgba(255,228,164,.38),0 0 25px rgba(103,195,255,.22);
+}
+.brand-copy small{color:#8fa7c9;letter-spacing:2px}
+nav>a{
+  color:#aab9d5;
+  border-radius:11px;
+  transition:color .2s ease,background .2s ease,border-color .2s ease,box-shadow .2s ease;
+}
+nav>a:hover{
+  color:var(--gold-bright);
+  background:rgba(104,169,220,.12);
+  border-color:rgba(120,196,245,.2);
+  box-shadow:0 0 20px rgba(82,169,225,.1);
+}
+.panel,.feature-card,.community-stat,.ranking-panel{
+  background:var(--panel)!important;
+  border:1px solid var(--line)!important;
+  border-radius:var(--radius);
+  box-shadow:var(--shadow),inset 0 1px rgba(255,255,255,.035);
+  backdrop-filter:blur(18px);
+  -webkit-backdrop-filter:blur(18px);
+}
+h1{
+  color:var(--gold-bright);
+  background:linear-gradient(105deg,#fff1c8 0%,#e5c16e 40%,#9cddff 82%,#d8c7ff 100%);
+  -webkit-background-clip:text;
+  background-clip:text;
+  -webkit-text-fill-color:transparent;
+  filter:drop-shadow(0 0 16px rgba(103,178,232,.12));
+}
+h2,h3{color:#eaf2ff}
+.tag{
+  color:#c6eaff;
+  border-color:rgba(107,193,237,.28);
+  background:linear-gradient(120deg,rgba(45,112,157,.22),rgba(85,69,133,.2));
+}
+button,.btn{
+  color:#081423;
+  border:1px solid rgba(255,231,175,.35);
+  background:linear-gradient(110deg,#f0d58f 0%,#b8dfff 55%,#83dfff 100%);
+  box-shadow:0 7px 22px rgba(67,160,218,.18),0 0 24px rgba(229,192,110,.09);
+  transition:transform .2s ease,filter .2s ease,box-shadow .2s ease;
+}
+button:hover,.btn:hover{
+  color:#081423;
+  filter:brightness(1.08);
+  box-shadow:0 9px 28px rgba(67,160,218,.28),0 0 28px rgba(229,192,110,.15);
+}
+.secondary{
+  color:#d8eaff!important;
+  background:rgba(31,47,77,.78)!important;
+  border-color:rgba(132,169,224,.28)!important;
+  box-shadow:none!important;
+}
+.secondary:hover{color:var(--gold-bright)!important;background:rgba(49,67,104,.85)!important}
+.danger{color:#fff!important;background:linear-gradient(110deg,#a93654,#d45a70)!important;border:1px solid rgba(255,150,170,.25)!important}
+.good{color:#071c19!important;background:linear-gradient(110deg,#72d8b2,#b2efd6)!important}
+input,textarea,select{
+  color:var(--text);
+  background:rgba(7,14,29,.78);
+  border-color:rgba(126,160,213,.27);
+  border-radius:12px;
+}
+input:focus,textarea:focus,select:focus{
+  border-color:rgba(113,207,255,.8);
+  box-shadow:0 0 0 3px rgba(91,184,231,.14),0 0 22px rgba(91,184,231,.08);
+}
+input::placeholder,textarea::placeholder{color:#788cac}
+label{color:#aebed9}
+.notice{
+  color:#b9f2dc;
+  background:rgba(20,73,62,.45);
+  border-color:rgba(91,211,164,.3);
+}
+.error{
+  color:#ffc4d0;
+  background:rgba(92,28,49,.48);
+  border-color:rgba(255,115,146,.35);
+}
+.empty{
+  color:var(--muted);
+  background:rgba(13,22,42,.68);
+  border-color:rgba(132,164,216,.3);
+}
+table{color:var(--text);background:transparent}
+th{color:#b9c9e5;background:rgba(31,45,73,.75)}
+td,th{border-bottom-color:rgba(133,166,224,.16)}
+tbody tr:hover{background:rgba(89,139,193,.08)}
+code{color:#c4e9ff;background:rgba(64,118,169,.2)}
+.resource{
+  border:1px solid rgba(130,169,224,.2);
+  background:linear-gradient(155deg,rgba(24,37,65,.9),rgba(12,20,39,.94));
+  box-shadow:0 14px 38px rgba(0,0,0,.24);
+}
+.resource:hover{
+  border-color:rgba(112,204,255,.55);
+  box-shadow:0 20px 48px rgba(0,0,0,.34),0 0 26px rgba(78,171,225,.13);
+}
+.resource h3{color:#eff6ff}
+.resource .muted{color:#9aacca}
+.cover{background:linear-gradient(135deg,#172846,#28234a)}
+.hero{
+  border-color:rgba(130,177,235,.27);
+  background:
+    radial-gradient(ellipse at 84% 15%,rgba(89,130,220,.27),transparent 38%),
+    radial-gradient(ellipse at 73% 100%,rgba(41,169,196,.16),transparent 40%),
+    linear-gradient(115deg,rgba(11,23,44,.96),rgba(28,25,57,.94) 58%,rgba(23,35,62,.96));
+  box-shadow:0 24px 70px rgba(0,0,0,.32),inset 0 1px rgba(255,255,255,.04);
+}
+.hero:before{
+  border-color:rgba(111,190,242,.25);
+  box-shadow:0 0 0 24px rgba(111,190,242,.055),0 0 0 55px rgba(154,120,230,.045),0 0 0 88px rgba(111,190,242,.03);
+}
+.hero:after{content:"✧";color:rgba(226,195,123,.09)}
+.hero-title-accent{
+  background:linear-gradient(100deg,#f5d990 0%,#a6e6ff 48%,#c7b0ff 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.hero-lead{color:#b3c3df}
+.hero-meta span{color:#c3d5ed;background:rgba(8,16,33,.55);border-color:rgba(130,174,229,.2)}
+.feature-card{background:linear-gradient(145deg,rgba(25,42,70,.86),rgba(19,23,48,.9))!important}
+.feature-icon{color:#d9efff;background:linear-gradient(135deg,rgba(50,117,162,.4),rgba(92,66,139,.42))}
+.community-stat{background:linear-gradient(145deg,rgba(25,42,70,.86),rgba(19,23,48,.9))!important}
+.community-stat strong{color:var(--gold-bright)}
+.rank-number{color:#f2d68f;background:rgba(172,133,57,.16)}
+.ranking-item a{color:#e8f2ff}
+.page-kicker{color:#83dfff}
+.section-heading{border-color:var(--line)}
+.footer{color:#8295b7}
+details,summary{color:#c5d5ee}
+pre{color:#c8d8f1}
+[hidden]{display:none!important}
+@media(max-width:640px){
+  .wrap{padding:10px 12px 20px}
+  header{top:5px;padding:10px 11px;margin-bottom:17px;border-radius:15px}
+  .brand{font-size:17px}
+  nav{gap:3px}
+  nav>a{font-size:12px;padding:7px 8px}
+  .panel{padding:15px}
+}
+@media(prefers-reduced-motion:no-preference){
+  .logo{animation:starfallPulse 4.8s ease-in-out infinite}
+  @keyframes starfallPulse{
+    0%,100%{box-shadow:0 0 0 1px rgba(255,228,164,.34),0 0 18px rgba(103,195,255,.16)}
+    50%{box-shadow:0 0 0 1px rgba(255,228,164,.48),0 0 29px rgba(103,195,255,.3)}
+  }
+}
