@@ -1,7 +1,6 @@
 import asyncio
 import tempfile
 
-import pytest
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
@@ -32,7 +31,7 @@ def upload(filename, data):
     return UploadFile(filename=filename, file=f)
 
 
-def test_cover_size_http_exception_happens_before_any_upload(monkeypatch):
+def test_cover_size_error_is_rendered_before_any_upload(monkeypatch):
     uploaded_keys = []
     deleted_keys = []
     monkeypatch.setattr(main, "current_user", lambda _request: {"id": 7, "role": "user"})
@@ -43,19 +42,20 @@ def test_cover_size_http_exception_happens_before_any_upload(monkeypatch):
     archive = upload("test.zip", b"PK\x03\x04" + b"x" * 20)
     cover = upload("cover.png", b"\x89PNG\r\n\x1a\n" + b"x" * (8 * 1024 * 1024))
 
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(main.submit_resource(
-            make_request(),
-            resource_type="archive",
-            name="test resource",
-            description="",
-            archive=archive,
-            cover=cover,
-            csrf_token="test-token",
-        ))
+    response = asyncio.run(main.submit_resource(
+        make_request(),
+        resource_type="archive",
+        name="test resource",
+        description="",
+        archive=archive,
+        cover=cover,
+        csrf_token="test-token",
+    ))
 
-    assert exc.value.status_code == 413
-    assert exc.value.detail == "Cover image exceeds 8 MiB limit"
+    # The HTML form route converts upload-limit exceptions into a useful
+    # page-level validation message rather than returning a raw API error.
+    assert response.status_code == 200
+    assert "Cover image exceeds 8 MiB limit" in response.body.decode("utf-8")
     # All files are staged and validated before storage writes begin.
     assert uploaded_keys == []
     assert deleted_keys == []
