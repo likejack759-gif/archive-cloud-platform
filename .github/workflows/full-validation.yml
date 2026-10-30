@@ -40,7 +40,7 @@ jobs:
           print(f"Parsed {len(files)} templates successfully")
           PY
       - name: Pytest
-        run: pytest -q
+        run: python -m pytest -q
       - name: Docker Compose configuration check
         env:
           SECRET_KEY: ci-test-secret-not-for-production
