@@ -35,10 +35,24 @@ The recovered tree includes the FastAPI application, Jinja2 templates, PostgreSQ
 - ZIP/APK content listing and bounded text preview are implemented; 7Z/RAR content browsing is not yet implemented.
 - This pass has not deployed anything and has not changed the production VPS.
 
-## Validation still required
+## Validation results
 
-- Wait for GitHub Actions on this branch and inspect failures.
-- Verify all Jinja templates parse and all existing tests pass.
+At commit `b62c459d4d4442b4980e88cb271814aa89a3cb57`, GitHub Actions reported:
+
+- Full Validation: **passed**.
+- Python compile check: passed.
+- Jinja2 template parsing: **12 templates parsed successfully**.
+- Pytest: **35 passed, 3 skipped, 2 warnings**.
+- Docker Compose configuration check: passed.
+- Security checks: **passed**.
+- Security guard, community plaza, upload cleanup, upload review, quota and PostgreSQL invitation concurrency tests: passed.
+- Static CSRF check: **13 POST routes** confirmed to include CSRF validation; form token structure passed.
+
+The skipped tests and two deprecation warnings still need review; a passing CI run is not equivalent to a production integration test.
+
+## Remaining validation before any deployment
+
 - Run integration tests against isolated PostgreSQL and an isolated S3-compatible bucket.
 - Confirm the target VPS's actual SeaweedFS S3 endpoint, bucket, access-key pair, database URL, and network topology before preparing a deployment configuration.
+- Verify the ClamAV service endpoint and perform a real clean/infected test before enabling approvals that depend on scanning.
 - Review all recovered feature routes and templates against the original product requirements.
